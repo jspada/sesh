@@ -1,0 +1,67 @@
+[package]
+name = "sesh"
+version = "0.1.0"
+edition = "2021"
+authors = ["Joseph Spadavecchia <joseph@redtrie.com>"]
+description = "sesh - 2- and 3-party shared secrets and encrypted keystore over BLS12-381"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "sesh"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sesh"
+path = "src/main.rs"
+
+[dependencies]
+# BLS12-381 groups, pairing, subgroup checks (blstrs) and BLS signatures (blst).
+blstrs = "0.7"
+blst = "0.3"
+ff = "0.13"
+group = "0.13"
+
+# CLI + process plumbing.
+clap = "3.2.23"
+exitcode = "1.1.2"
+
+# Encodings for secret / pubkey output.
+hex = "0.4"
+bs58 = "0.5.1"
+bip39 = { version = "2.2", features = ["zeroize"] }
+num-bigint = "0.4.5"
+
+# Randomness.
+rand = "0.8"
+
+# Hashing (H2S, subkey derivation) - stable, audited release (replaces 0.11.0-pre.4).
+sha3 = "0.10"
+
+# Keystore at-rest encryption.
+aes-gcm = "0.10"
+argon2 = "0.5"
+
+# Secret hygiene.
+rpassword = "7"
+zeroize = { version = "1", features = ["derive"] }
+
+# Config-file ownership check (geteuid) for the relocatable keystore pointer.
+libc = "0.2"
+
+# Keystore (de)serialization.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
+
+# Build dependencies optimized even in the dev profile. Argon2id at 64 MiB × 3
+# passes costs ~8 s per hash when compiled unoptimized, and every identity's seed
+# is encrypted, so an unoptimized `cargo test` spends nearly all of its time in
+# the KDF. `sesh` itself is untouched: debug info and backtraces are unaffected,
+# and no cost parameter changes.
+[profile.dev.package."*"]
+opt-level = 3
