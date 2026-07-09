@@ -6,6 +6,10 @@ password safe without ever transmitting secret information. Its multi-user
 password safes works by establishing **2- and 3-party shared secrets** over an
 insecure channel using **BLS12-381**, backed by an **encrypted local keystore**.
 
+<p align="center">
+  <img src="screenshot.png" alt="sesh in action" width="700">
+</p>
+
 Generally, for any keypair we store only one master secret. Everything else
 (shared-secrets and password safe secrets) belonging to the identity is
 hierarchically and deterministically (HD) derived (only when needed)
