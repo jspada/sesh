@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Joseph Spadavecchia <joseph@redtrie.com>"]
 description = "sesh - 2- and 3-party shared secrets and encrypted keystore over BLS12-381"
+license = "MIT OR Apache-2.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

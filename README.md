@@ -476,3 +476,22 @@ masters (an identity's `s_dh`, a group `K`) are wrapped in a `SecretScalar` that
 is scrubbed on drop. Zeroization is **best-effort**: `blstrs` scalars are `Copy`
 and cannot implement `Zeroize` (orphan rule), so transient copies the code makes
 in registers or on the stack are not tracked.
+
+## License
+
+Copyright (c) 2026 Joseph Spadavecchia.
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+  <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or
+  <http://opensource.org/licenses/MIT>)
+
+at your option.
+
+Contributions are accepted under the terms of the [Contributor License
+Agreement](CLA.md): you keep copyright in your work, license it to the
+project for distribution under the licenses above, and grant the maintainer
+the right to relicense. State your agreement in your first pull request
+(see CLA.md §6).
