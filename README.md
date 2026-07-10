@@ -1,4 +1,4 @@
-# sesh - Secret Encrypted Shared Hierarchy
+# sesh - Shared Encrypted Secret Hierarchy
 
 <p align="center">
   <img src="screenshot.png" alt="sesh in action" width="700">
