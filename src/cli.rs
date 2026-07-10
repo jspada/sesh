@@ -796,8 +796,7 @@ fn ensure_pointer_available(loc: &config::Location) -> Result<(), String> {
         // Path exists but holds no keystore. A pointer never auto-creates one,
         // so point --keystore at it once to provision it, then the pointer finds it.
         (_, None) => Err(format!(
-            "no keystore at {path} - create it first with `sesh --keystore {path} keypair create <name>`, \
-             then this config pointer will find it"
+            "no keystore at {path} - create it first by creating a keypair"
         )),
     }
 }
