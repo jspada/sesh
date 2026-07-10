@@ -1,20 +1,20 @@
 # sesh - Secret Encrypted Shared Hierarchy
 
+<p align="center">
+  <img src="screenshot.png" alt="sesh in action" width="700">
+</p>
+
 Sesh is a password safe supporting both single-user and multi-user scenarios.
 It allows 2 or 3 distributed users to create and maintain a shared, replicated
 password safe without ever transmitting secret information. Its multi-user
 password safes works by establishing **2- and 3-party shared secrets** over an
 insecure channel using **BLS12-381**, backed by an **encrypted local keystore**.
 
-<p align="center">
-  <img src="screenshot.png" alt="sesh in action" width="700">
-</p>
-
-Generally, for any keypair we store only one master secret. Everything else
-(shared-secrets and password safe secrets) belonging to the identity is
+There is only one master secret stored per password safe. Everything else
+(secretes, shared-secrets and passwords) belonging to the safe is
 hierarchically and deterministically (HD) derived (only when needed)
-from the keypair's master secret.  This approach has many advantages in
-addition to never transmitting secrets.
+from the master secret.  This approach has many advantages in addition to
+never transmitting secrets.
 
 Each password safe only needs a single initial backup, unless the corresponding
 keypair's secret was initialised from a --mnemonic, in which case no backup is
