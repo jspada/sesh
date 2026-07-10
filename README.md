@@ -16,15 +16,13 @@ hierarchically and deterministically (HD) derived (only when needed)
 from the master secret.  This approach has many advantages in addition to
 never transmitting secrets.
 
-Each password safe only needs a single initial backup, unless the corresponding
+Sesh password safes only needs a single initial backup, unless the corresponding
 keypair's secret was initialised from a --mnemonic, in which case no backup is
-required (n.b. this assumes the mnemonic has already been backed up somewhere
-else). In both scenarios, subsequent backups are not required when passwords
-are created or updated (the associated metadata should either be memorable or saved
-separately... more on this later). For convenience full backup and restore
-functionality is provided as well as a decentralized secret-share password safe
-backup mechanism. For consistency, mnemonic secrets are not backed up, but their
-corresponding metadata can be.
+required. In both scenarios, subsequent backups are not required when passwords
+are created or updated (more on this later). For convenience sesh provides full
+backup and restore functionality as well as a decentralized secret-share password
+safe backup mechanism that works without transmitting secrets. Mnemonic secrets
+are not backed up by sesh, but their corresponding metadata can be.
 
 For the decentralized shared-secret backup the group's master `K` is
 derived from the members' setup tokens and stored nowhere.  Consequently it can
