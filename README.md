@@ -11,10 +11,9 @@ password safes works by establishing **2- and 3-party shared secrets** over an
 insecure channel using **BLS12-381**, backed by an **encrypted local keystore**.
 
 There is only one master secret stored per password safe. Everything else
-(secretes, shared-secrets and passwords) belonging to the safe is
-hierarchically and deterministically (HD) derived (only when needed)
-from the master secret.  This approach has many advantages in addition to
-never transmitting secrets.
+(secretes, shared-secrets and passwords) is hierarchically and
+deterministically (HD) derived (only when needed) from the master secret. This
+approach has many advantages, in addition to never transmitting secrets.
 
 Sesh password safes only needs a single initial backup, unless the corresponding
 keypair's secret was initialised from a mnemonic, in which case no backup is
@@ -22,9 +21,9 @@ required. In both scenarios, subsequent backups are not required when passwords
 are created or updated (more on this later).
 
 For convenience sesh provides full backup and restore functionality for master
-secrets and their corresponding metadata as well as a decentralized secret-share
+secrets and their corresponding metadata, and also a decentralized secret-share
 password safe backup mechanism that works without transmitting secrets. Mnemonic
-secrets are not backed up by sesh, but their corresponding metadata can be.
+master secrets are not backed up by sesh, but their corresponding metadata can be.
 
 For the decentralized shared-secret backup the group's master `K` is
 derived from the members' setup tokens and stored nowhere.  Consequently, it can
