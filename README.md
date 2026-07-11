@@ -199,6 +199,14 @@ $ sesh contact show alice                # Show's name, fingerprint, pinned toke
 $ sesh contact list
 ```
 
+N.B. putting the contact token on the command-line is optional, the better way is
+interactively, like so.
+
+```console
+sesh add
+Peer contact token: 2Rz...
+```
+
 ### 3. Create a shared secret
 
 **Interactive wizard** (default on a terminal):
@@ -326,6 +334,14 @@ group-bound **share tokens** with no secret material, just the recipe.
 $ sesh hd-secret apply <share-token>   # Apply an password safe update, where
                                        #   the token identifies the group automatically
 $ sesh hd-secret OurGroup share vpn    # Re-share a stored entry (no secret transmitted)
+```
+
+N.B. putting the contact token on the command-line is optional, the better way is
+interactively, like so.
+
+```console
+sesh hd-secret apply
+Share token: <share-token>
 ```
 
 `apply` adopts a newer epoch, ignores a stale one, and on a same-epoch

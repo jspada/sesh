@@ -152,9 +152,8 @@ pub fn build_cli() -> Command {
                 .subcommand(
                     Command::new("add")
                         .about("Pin a peer's contact token under its embedded name (or --name)")
-                        .arg_required_else_help(true)
-                        .arg(Arg::new("token").required(true)
-                            .help("The peer's base58check contact token"))
+                        .arg(Arg::new("token")
+                            .help("The peer's base58check contact token (prompts if omitted)"))
                         .arg(Arg::new("name").short('n').long("name")
                             .help("Pin under this local alias instead of the token's name")),
                 )
@@ -434,9 +433,8 @@ pub fn build_cli() -> Command {
                 .subcommand(
                     Command::new("apply")
                         .about("Apply a group member's registry share token (shows a diff, asks Y/N)")
-                        .arg_required_else_help(true)
-                        .arg(Arg::new("token").required(true)
-                            .help("The base58check share token")),
+                        .arg(Arg::new("token")
+                            .help("The base58check share token (prompts if omitted)")),
                 )
         })
         // backup / restore subcommands
@@ -834,6 +832,15 @@ fn read_password_noecho(prompt: &str) -> std::io::Result<String> {
     }
 }
 
+fn prompt_token(prompt: &str) -> Result<String, String> {
+    use crate::wizard::Terminal as _;
+    let line = StdioTerminal::new().prompt_line(prompt).map_err(se)?;
+    if line.is_empty() {
+        return Err("no token entered".into());
+    }
+    Ok(line)
+}
+
 /// Read the password needed to unlock keypair `name`. Every identity is
 /// encrypted, so this always prompts-- there is nothing to inspect first.
 fn unlock_password(name: &str) -> Result<Zeroizing<String>, String> {
@@ -1055,8 +1062,11 @@ fn cmd_contact(m: &ArgMatches) -> Result<(), String> {
     let ks = keystore()?;
     match m.subcommand() {
         Some(("add", sm)) => {
-            let token = sm.get_one::<String>("token").map(String::as_str).unwrap();
-            let (embedded, public) = decode_contact_token(token).map_err(se)?;
+            let token = match sm.get_one::<String>("token") {
+                Some(t) => t.clone(),
+                None => prompt_token("Peer contact token: ")?,
+            };
+            let (embedded, public) = decode_contact_token(&token).map_err(se)?;
             // The token's embedded name is the default alias; --name overrides
             let alias = match sm.get_one::<String>("name").map(String::as_str) {
                 Some(n) => n.to_string(),
@@ -2998,10 +3008,11 @@ fn cmd_hd_share(owner: &str, m: &ArgMatches) -> Result<(), String> {
 }
 
 fn cmd_hd_apply(m: &ArgMatches) -> Result<(), String> {
-    hd_apply(
-        &mut StdioTerminal::new(),
-        m.get_one::<String>("token").map(String::as_str).unwrap(),
-    )
+    let token = match m.get_one::<String>("token") {
+        Some(t) => t.clone(),
+        None => prompt_token("Share token: ")?,
+    };
+    hd_apply(&mut StdioTerminal::new(), &token)
 }
 
 /// Apply one incoming share token: identify its group by recomputing every
