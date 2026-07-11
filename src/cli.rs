@@ -224,7 +224,7 @@ pub fn build_cli() -> Command {
                 // would be a silent breaking change.
                 .subcommand(
                     Command::new("export")
-                        .about("Write an encrypted, member-only backup of a group and its registry (no secrets exported")
+                        .about("Write an encrypted, member-only backup of a group and its registry (no secrets exported)")
                         .long_about(
                             "Write one encrypted file holding everything a fellow member needs \
                              to rebuild this group and its hd-secret registry from nothing but \
@@ -321,7 +321,7 @@ pub fn build_cli() -> Command {
             // positional, entity names can never equal a subcommand word
             // (reserved-name rule, enforced at creation).
             Command::new("hd-secret")
-                .about("Manage and derive HD child secrets (a password-manager layer)")
+                .about("Manage and derive HD child secrets (password-manager layer)")
                 .arg_required_else_help(true)
                 .arg(Arg::new("owner")
                     .help("Owning keypair or shared-secret group"))
