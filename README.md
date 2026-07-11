@@ -6,8 +6,9 @@
 
 Sesh is a **keysafe**: it derives and manages passwords and PINs like a
 password safe, but also cryptographic keys and BIP39 mnemonics, all from
-a single master secret, for one user or shared between 2–3 users. It allows
-distributed users to create and maintain a shared, replicated
+a single master secret, for one user or shared between 2–3 users.
+
+It allows distributed users to create and maintain a shared, replicated
 keysafe without ever transmitting secret information. Its multi-user
 keysafes works by establishing **2- and 3-party shared secrets** over an
 insecure channel using **BLS12-381**, backed by an **encrypted local keystore**.
