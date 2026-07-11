@@ -333,7 +333,9 @@ pub fn build_cli() -> Command {
                         // `rotate`, which were never removed. `--archived` is
                         // what the table actually contains.
                         .arg(Arg::new("archived").long("archived").action(ArgAction::SetTrue).visible_alias("removed")
-                            .help("List superseded recipes (from `rotate` and `remove`) instead")),
+                            .help("List superseded recipes (from `rotate` and `remove`) instead"))
+                        .arg(Arg::new("verbose").short('v').long("verbose").action(ArgAction::SetTrue)
+                            .help("Include the Params column")),
                 )
                 .subcommand(
                     Command::new("create")
@@ -2349,6 +2351,7 @@ fn cmd_hd_list(owner: &str, m: &ArgMatches) -> Result<(), String> {
     let reg = ks.load_registry(&rs.scope, &seed).map_err(se)?;
     let master = master_for(&ks, &rs, &seed)?;
     let archived = m.get_flag("archived");
+    let verbose = m.get_flag("verbose");
 
     // Say which kind of owner this registry belongs to
     if rs.group_state.is_some() {
@@ -2363,20 +2366,23 @@ fn cmd_hd_list(owner: &str, m: &ArgMatches) -> Result<(), String> {
         println!("(archived recipes, superseded by `rotate` or `remove`)");
     }
     println!();
-    let mut table = Table::new(&["Id", "User", "Epoch", "Params", "Fingerprint"]);
+    let mut table = if verbose {
+        Table::new(&["Id", "User", "Epoch", "Params", "Fingerprint"])
+    } else {
+        Table::new(&["Id", "User", "Epoch", "Fingerprint"])
+    };
     let rows = if archived {
         reg.archived_all()
     } else {
         reg.live()
     };
     for d in rows {
-        table.push(vec![
-            d.id.clone(),
-            d.user.clone(),
-            d.epoch.to_string(),
-            describe_params(&master, d),
-            hd_fingerprint_of(&master, d),
-        ]);
+        let mut row = vec![d.id.clone(), d.user.clone(), d.epoch.to_string()];
+        if verbose {
+            row.push(describe_params(&master, d));
+        }
+        row.push(hd_fingerprint_of(&master, d));
+        table.push(row);
     }
     if table.is_empty() {
         println!(

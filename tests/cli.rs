@@ -1729,7 +1729,7 @@ fn hd_create_defaults_are_sensible_and_recorded_in_the_params() {
 
     // The recipe survives a round trip through the registry, so a later change
     // to the built-in defaults cannot alter this password.
-    let listed = run_pw(home.path(), &["hd-secret", "me", "list"]);
+    let listed = run_pw(home.path(), &["hd-secret", "me", "list", "--verbose"]);
     assert_eq!(table_cell(&listed, "google.com", 3), default_params_row());
     assert_eq!(hd_secret_of(home.path(), "me", "google.com"), secret);
 }
@@ -1899,7 +1899,7 @@ fn hd_bare_symbols_equals_spelling_the_default_set_out() {
 
     // Both stored the resolved set, and `list` renders the default one bare
     for home in [bare.path(), spelled.path()] {
-        let listed = run_pw(home, &["hd-secret", "me", "list"]);
+        let listed = run_pw(home, &["hd-secret", "me", "list", "--verbose"]);
         assert_eq!(table_cell(&listed, "x", 3), default_params_row());
     }
 }
@@ -1925,7 +1925,7 @@ fn hd_a_custom_symbol_set_draws_only_from_that_set() {
         "the set must appear: {secret}"
     );
     // The stored recipe names the exact alphabet it used
-    let listed = run_pw(home.path(), &["hd-secret", "me", "list"]);
+    let listed = run_pw(home.path(), &["hd-secret", "me", "list", "--verbose"]);
     assert_eq!(
         table_cell(&listed, "b", 3),
         "--mode b58 --length 14 --symbols='!@#$' --suffix none"
@@ -2206,12 +2206,15 @@ fn registry_create_show_list_roundtrip() {
 
     // list says whose registry it is, then the table (fingerprint right of
     // params), never secrets.
-    let listed = run_pw(home.path(), &["hd-secret", "me", "list"]);
+    let listed = run_pw(home.path(), &["hd-secret", "me", "list", "--verbose"]);
     assert!(listed.starts_with("Personal: me\n"));
     assert_eq!(table_cell(&listed, "google.com", 2), "1");
     assert_eq!(table_cell(&listed, "google.com", 3), default_params_row());
     assert_eq!(table_cell(&listed, "google.com", 4), fpr);
     assert!(!listed.contains(&secret));
+    let plain = run_pw(home.path(), &["hd-secret", "me", "list"]);
+    assert!(!plain.contains("Params"), "{plain}");
+    assert_eq!(table_cell(&plain, "google.com", 3), fpr);
 
     // A duplicate create errors (use rotate to change it)
     sesh_pw(home.path())
@@ -2339,7 +2342,7 @@ fn hd_rotate_dry_run_changes_nothing() {
     let shown = run_pw(home.path(), &["hd-secret", "me", "show", "x"]);
     assert_eq!(field(&shown, "Epoch"), "1");
     assert_eq!(hd_secret_of(home.path(), "me", "x"), secret);
-    let listed = run_pw(home.path(), &["hd-secret", "me", "list"]);
+    let listed = run_pw(home.path(), &["hd-secret", "me", "list", "--verbose"]);
     assert_eq!(table_cell(&listed, "x", 3), default_params_row());
 
     // Group scope: the dry run also previews the share token, still unstored
@@ -2495,7 +2498,7 @@ fn hd_mode_override_is_display_only() {
     // ...but is never persisted: stored params still say b58, the fingerprint
     // (over the raw child, not its encoding) is unchanged, and a plain copy
     // still yields b58.
-    let listed = run_pw(home.path(), &["hd-secret", "me", "list"]);
+    let listed = run_pw(home.path(), &["hd-secret", "me", "list", "--verbose"]);
     assert_eq!(table_cell(&listed, "site", 3), default_params_row());
     assert_eq!(table_cell(&listed, "site", 4), fpr);
     assert_eq!(hd_secret_of(home.path(), "me", "site"), b58);
@@ -2689,7 +2692,11 @@ fn apply_carries_a_custom_symbol_set_across_the_group() {
     assert!(applied.contains("Applied NEW"));
     assert_eq!(a_secret, hd_secret_of(b, "grp", "vpn"));
     assert_eq!(
-        table_cell(&run_pw(b, &["hd-secret", "grp", "list"]), "vpn", 3),
+        table_cell(
+            &run_pw(b, &["hd-secret", "grp", "list", "--verbose"]),
+            "vpn",
+            3
+        ),
         "--mode b58 --length 14 --symbols='!@#$' --suffix none"
     );
 
@@ -3764,7 +3771,10 @@ fn list_archived_shows_superseded_recipes_and_plain_list_does_not() {
     assert!(plain.contains("(no definitions)"), "{plain}");
 
     // ...and its epoch and recipe are readable under --archived
-    let archived = run_pw(home.path(), &["hd-secret", "me", "list", "--archived"]);
+    let archived = run_pw(
+        home.path(),
+        &["hd-secret", "me", "list", "--archived", "--verbose"],
+    );
     assert_eq!(table_cell(&archived, "bank", 2), "1");
     assert!(archived.contains("--mode b58"), "full params:\n{archived}");
     assert!(
@@ -3773,7 +3783,10 @@ fn list_archived_shows_superseded_recipes_and_plain_list_does_not() {
     );
 
     // `--removed` is the same flag under the name a user reaches for first
-    let removed = run_pw(home.path(), &["hd-secret", "me", "list", "--removed"]);
+    let removed = run_pw(
+        home.path(),
+        &["hd-secret", "me", "list", "--removed", "--verbose"],
+    );
     assert_eq!(removed, archived);
 }
 
@@ -4215,7 +4228,7 @@ fn hd_fingerprint_recipe_half_tracks_params_and_secret_half_tracks_the_child() {
 
     // `list` renders the same fingerprint `show` does, dash and all
     let listed = run_pw(home.path(), &["hd-secret", "me", "list"]);
-    assert_eq!(table_cell(&listed, "bank", 4), format!("{r2}-{s2}"));
+    assert_eq!(table_cell(&listed, "bank", 3), format!("{r2}-{s2}"));
 }
 
 // Inheriting must not be quietly rewritten by clap's `create --mode` default.
