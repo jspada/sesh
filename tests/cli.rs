@@ -177,14 +177,14 @@ fn keypair_password_change() {
 
     // The old password no longer unlocks a seed-touching command...
     sesh_pw(home.path())
-        .args(["hd-secret", "me", "create", "google.com"])
+        .args(["hd-secret", "create", "me", "google.com"])
         .assert()
         .failure()
         .stderr(contains("wrong password"));
 
     // ...and the new one does
     sesh(home.path())
-        .args(["hd-secret", "me", "create", "google.com"])
+        .args(["hd-secret", "create", "me", "google.com"])
         .write_stdin("new\n")
         .assert()
         .success();
@@ -201,7 +201,7 @@ fn keypair_password_wrong_current_password_fails() {
         .failure()
         .stderr(contains("wrong password"));
     // The original password still works
-    run_pw(home.path(), &["hd-secret", "me", "create", "google.com"]);
+    run_pw(home.path(), &["hd-secret", "create", "me", "google.com"]);
 }
 
 #[test]
@@ -214,7 +214,7 @@ fn keypair_password_mismatched_confirmation_fails() {
         .assert()
         .failure()
         .stderr(contains("do not match"));
-    run_pw(home.path(), &["hd-secret", "me", "create", "google.com"]);
+    run_pw(home.path(), &["hd-secret", "create", "me", "google.com"]);
 }
 
 #[test]
@@ -347,11 +347,11 @@ fn password_free_commands_never_prompt() {
 fn seed_reading_commands_do_prompt() {
     let home = TempDir::new().unwrap();
     make_identity(home.path(), "me");
-    run_pw(home.path(), &["hd-secret", "me", "create", "site"]);
+    run_pw(home.path(), &["hd-secret", "create", "me", "site"]);
 
     for args in [
-        vec!["hd-secret", "me", "list"],
-        vec!["hd-secret", "me", "show", "site"],
+        vec!["hd-secret", "list", "me"],
+        vec!["hd-secret", "show", "me", "site"],
     ] {
         sesh(home.path())
             .args(&args)
@@ -471,7 +471,7 @@ fn keypair_remove_cascades_owned_groups() {
     assert!(out.contains("Removed identity 'me'"));
     assert!(run_ok(a, &["shared-secret", "list"]).contains("(no shared secrets)"));
     sesh(a)
-        .args(["hd-secret", "grp", "list"])
+        .args(["hd-secret", "list", "grp"])
         .assert()
         .failure();
     // B's copy of the group is untouched
@@ -712,7 +712,7 @@ fn shared_secret_master_never_leaves_the_keystore() {
 
     // The stored master K keys the group's hd-secrets and never leaves the
     // keystore: export/reveal/copy/dump do not exist in this family. Its leaf
-    // secrets are reached only through `hd-secret <group> copy` / `reveal`.
+    // secrets are reached only through `hd-secret copy <group>` / `reveal`.
     for sub in ["export", "reveal", "copy", "dump"] {
         sesh(a)
             .args(["shared-secret", sub, "grp"])
@@ -820,7 +820,7 @@ fn keystore_flag_overrides_location_and_env() {
 fn backup_restore_round_trips_the_keystore() {
     let src = TempDir::new().unwrap();
     make_identity(src.path(), "me");
-    run_pw(src.path(), &["hd-secret", "me", "create", "google.com"]);
+    run_pw(src.path(), &["hd-secret", "create", "me", "google.com"]);
     let secret_before = hd_secret_of(src.path(), "me", "google.com");
 
     // Back up (passphrase entered twice), producing a single encrypted file
@@ -948,8 +948,8 @@ fn form_peer_group(a: &Path, b: &Path, group: &str) {
 fn mnemonic_keypair_round_trips_without_its_seed_in_the_bundle() {
     let (a, b) = wire_mnemonic_pair(ZERO_MNEMONIC);
     form_peer_group(a.path(), b.path(), "grp");
-    run_pw(a.path(), &["hd-secret", "me", "create", "personal"]);
-    run_pw(a.path(), &["hd-secret", "grp", "create", "shared"]);
+    run_pw(a.path(), &["hd-secret", "create", "me", "personal"]);
+    run_pw(a.path(), &["hd-secret", "create", "grp", "shared"]);
     let personal_before = hd_secret_of(a.path(), "me", "personal");
     let shared_before = hd_secret_of(a.path(), "grp", "shared");
 
@@ -990,7 +990,7 @@ fn mnemonic_keypair_round_trips_without_its_seed_in_the_bundle() {
 fn a_random_seed_keypair_is_included_and_restores_with_no_mnemonic_prompt() {
     let src = TempDir::new().unwrap();
     make_identity(src.path(), "me");
-    run_pw(src.path(), &["hd-secret", "me", "create", "site"]);
+    run_pw(src.path(), &["hd-secret", "create", "me", "site"]);
     let before = hd_secret_of(src.path(), "me", "site");
 
     let bundle = src.path().join("b.sesh");
@@ -1132,12 +1132,12 @@ fn a_skipped_mnemonic_is_not_a_failure_and_cascades_to_its_groups() {
     import_mnemonic(a, "keepme", ONES_MNEMONIC);
     make_identity(a, "randkp");
     form_peer_group(a, b, "gone"); // owned by 'me'
-    run_pw(a, &["hd-secret", "gone", "create", "groupsecret"]);
+    run_pw(a, &["hd-secret", "create", "gone", "groupsecret"]);
     // 'me' needs a *personal* registry too, so `keypairs/me/registry` exists in
     // the bundle. Without it, skipping the directory and skipping only its
     // `identity` file would be indistinguishable and the latter is the wrong
     // implementation this test exists to reject.
-    run_pw(a, &["hd-secret", "me", "create", "personal"]);
+    run_pw(a, &["hd-secret", "create", "me", "personal"]);
 
     let bundle_path = a.join("b.sesh");
     let arg = bundle_path.to_str().unwrap();
@@ -1209,7 +1209,7 @@ fn a_skip_spares_groups_owned_by_a_restored_keypair() {
     let (a, b) = wire_mnemonic_pair(ZERO_MNEMONIC);
     let (a, b) = (a.path(), b.path());
     form_peer_group(a, b, "kept"); // owned by 'me' (mnemonic)
-    run_pw(a, &["hd-secret", "kept", "create", "s"]);
+    run_pw(a, &["hd-secret", "create", "kept", "s"]);
     let secret_before = hd_secret_of(a, "kept", "s");
     // A second mnemonic keypair that owns nothing, to be skipped
     import_mnemonic(a, "zzz", ONES_MNEMONIC);
@@ -1562,16 +1562,17 @@ fn hd_unknown_owner_and_owner_with_apply_rejected() {
     let home = TempDir::new().unwrap();
     make_identity(home.path(), "me");
     sesh(home.path())
-        .args(["hd-secret", "ghost", "list"])
+        .args(["hd-secret", "list", "ghost"])
         .assert()
         .failure()
         .stderr(contains("no keypair or shared-secret named 'ghost'"));
-    // apply identifies its group from the token; an owner is a usage error
+    // apply identifies its group from the token; it takes no owner positional,
+    // so a second value is a clap usage error
     sesh(home.path())
-        .args(["hd-secret", "me", "apply", "sometoken"])
+        .args(["hd-secret", "apply", "me", "sometoken"])
         .assert()
         .failure()
-        .stderr(contains("takes no owner"));
+        .stderr(contains("unexpected argument"));
 }
 
 // hd-secret param validation & formatting
@@ -1583,7 +1584,7 @@ fn hd_derive_subcommand_is_gone() {
     // The ad-hoc `derive` password generator was removed: no fingerprint, no
     // rotation, no inventory. Managed secrets are created, not derived.
     sesh(home.path())
-        .args(["hd-secret", "me", "derive", "google.com"])
+        .args(["hd-secret", "derive", "me", "google.com"])
         .assert()
         .failure();
 }
@@ -1597,8 +1598,8 @@ fn hd_length_and_suffix_applied() {
         home.path(),
         &[
             "hd-secret",
-            "me",
             "create",
+            "me",
             "x",
             "--mode",
             "hex",
@@ -1622,8 +1623,8 @@ fn hd_length_out_of_range_is_rejected_up_front() {
     sesh(home.path())
         .args([
             "hd-secret",
-            "me",
             "create",
+            "me",
             "x",
             "--mode",
             "b58",
@@ -1634,7 +1635,7 @@ fn hd_length_out_of_range_is_rejected_up_front() {
         .failure()
         .stderr(contains("length can be at most"));
     // Nothing was stored by the failed create
-    assert!(run_pw(home.path(), &["hd-secret", "me", "list"]).contains("(no definitions)"));
+    assert!(run_pw(home.path(), &["hd-secret", "list", "me"]).contains("(no definitions)"));
 }
 
 #[test]
@@ -1645,8 +1646,8 @@ fn hd_length_not_exceeding_suffix_is_rejected() {
     sesh(home.path())
         .args([
             "hd-secret",
-            "me",
             "create",
+            "me",
             "x",
             "--length",
             "2",
@@ -1669,8 +1670,8 @@ fn hd_stored_max_length_survives_rotation() {
         home.path(),
         &[
             "hd-secret",
-            "me",
             "create",
+            "me",
             "x",
             "--mode",
             "b10",
@@ -1680,7 +1681,7 @@ fn hd_stored_max_length_survives_rotation() {
     );
     for _ in 0..12 {
         assert_eq!(hd_secret_of(home.path(), "me", "x").len(), 78);
-        run_pw(home.path(), &["hd-secret", "me", "rotate", "x"]);
+        run_pw(home.path(), &["hd-secret", "rotate", "me", "x"]);
     }
 }
 
@@ -1715,7 +1716,7 @@ fn make_fixed_identity(home: &Path, name: &str) {
 fn hd_create_defaults_are_sensible_and_recorded_in_the_params() {
     let home = TempDir::new().unwrap();
     make_fixed_identity(home.path(), "me");
-    let created = run_pw(home.path(), &["hd-secret", "me", "create", "google.com"]);
+    let created = run_pw(home.path(), &["hd-secret", "create", "me", "google.com"]);
     assert_eq!(field(&created, "Params"), default_params_row());
 
     let secret = hd_secret_of(home.path(), "me", "google.com");
@@ -1729,7 +1730,7 @@ fn hd_create_defaults_are_sensible_and_recorded_in_the_params() {
 
     // The recipe survives a round trip through the registry, so a later change
     // to the built-in defaults cannot alter this password.
-    let listed = run_pw(home.path(), &["hd-secret", "me", "list", "--verbose"]);
+    let listed = run_pw(home.path(), &["hd-secret", "list", "me", "--verbose"]);
     assert_eq!(table_cell(&listed, "google.com", 3), default_params_row());
     assert_eq!(hd_secret_of(home.path(), "me", "google.com"), secret);
 }
@@ -1746,11 +1747,11 @@ fn hd_create_defaults_are_withheld_from_modes_that_take_no_symbol_set() {
 
     let alpha = run_pw(
         home.path(),
-        &["hd-secret", "me", "create", "a", "--mode", "alpha"],
+        &["hd-secret", "create", "me", "a", "--mode", "alpha"],
     );
     let bip39 = run_pw(
         home.path(),
-        &["hd-secret", "me", "create", "b", "--mode", "bip39"],
+        &["hd-secret", "create", "me", "b", "--mode", "bip39"],
     );
 
     // Full renderings, not 14-character stumps
@@ -1776,7 +1777,7 @@ fn hd_create_defaults_are_withheld_from_modes_that_take_no_symbol_set() {
     // hex does get both halves of the symbol-mixed package
     let out = run_pw(
         home.path(),
-        &["hd-secret", "me", "create", "h", "--mode", "hex"],
+        &["hd-secret", "create", "me", "h", "--mode", "hex"],
     );
     assert_eq!(
         field(&out, "Params"),
@@ -1788,7 +1789,7 @@ fn hd_create_defaults_are_withheld_from_modes_that_take_no_symbol_set() {
     // digits-only PIN, stored resolved, like every other default.
     let out = run_pw(
         home.path(),
-        &["hd-secret", "me", "create", "t", "--mode", "b10"],
+        &["hd-secret", "create", "me", "t", "--mode", "b10"],
     );
     assert_eq!(
         field(&out, "Params"),
@@ -1809,10 +1810,10 @@ fn hd_create_defaults_are_withheld_from_modes_that_take_no_symbol_set() {
 fn hd_rotate_drops_params_the_new_mode_cannot_render() {
     let home = TempDir::new().unwrap();
     make_fixed_identity(home.path(), "me");
-    run_pw(home.path(), &["hd-secret", "me", "create", "x"]); // b58 + 14 + symbols
+    run_pw(home.path(), &["hd-secret", "create", "me", "x"]); // b58 + 14 + symbols
 
     let out = sesh_pw(home.path())
-        .args(["hd-secret", "me", "rotate", "x", "--mode", "alpha"])
+        .args(["hd-secret", "rotate", "me", "x", "--mode", "alpha"])
         .assert()
         .success()
         .stderr(contains("Dropped --symbols"));
@@ -1825,10 +1826,10 @@ fn hd_rotate_drops_params_the_new_mode_cannot_render() {
     // bip39 can carry neither a trim nor a suffix; both go, and both are named
     run_pw(
         home.path(),
-        &["hd-secret", "me", "create", "y", "--suffix", "!!"],
+        &["hd-secret", "create", "me", "y", "--suffix", "!!"],
     );
     let out = sesh_pw(home.path())
-        .args(["hd-secret", "me", "rotate", "y", "--mode", "bip39"])
+        .args(["hd-secret", "rotate", "me", "y", "--mode", "bip39"])
         .assert()
         .success()
         .stderr(contains("Dropped --symbols"))
@@ -1852,12 +1853,12 @@ fn hd_rotate_drops_params_the_new_mode_cannot_render() {
 fn hd_rotate_refuses_a_mode_and_a_symbol_set_together() {
     let home = TempDir::new().unwrap();
     make_fixed_identity(home.path(), "me");
-    run_pw(home.path(), &["hd-secret", "me", "create", "x"]);
+    run_pw(home.path(), &["hd-secret", "create", "me", "x"]);
     sesh_pw(home.path())
         .args([
             "hd-secret",
-            "me",
             "rotate",
+            "me",
             "x",
             "--mode",
             "alpha",
@@ -1876,7 +1877,7 @@ fn hd_bare_symbols_equals_spelling_the_default_set_out() {
     make_fixed_identity(bare.path(), "me");
     run_pw(
         bare.path(),
-        &["hd-secret", "me", "create", "x", "--symbols"],
+        &["hd-secret", "create", "me", "x", "--symbols"],
     );
 
     let spelled = TempDir::new().unwrap();
@@ -1885,8 +1886,8 @@ fn hd_bare_symbols_equals_spelling_the_default_set_out() {
         spelled.path(),
         &[
             "hd-secret",
-            "me",
             "create",
+            "me",
             "x",
             &format!("--symbols={DEFAULT_SYMBOLS}"),
         ],
@@ -1899,7 +1900,7 @@ fn hd_bare_symbols_equals_spelling_the_default_set_out() {
 
     // Both stored the resolved set, and `list` renders the default one bare
     for home in [bare.path(), spelled.path()] {
-        let listed = run_pw(home, &["hd-secret", "me", "list", "--verbose"]);
+        let listed = run_pw(home, &["hd-secret", "list", "me", "--verbose"]);
         assert_eq!(table_cell(&listed, "x", 3), default_params_row());
     }
 }
@@ -1910,7 +1911,7 @@ fn hd_a_custom_symbol_set_draws_only_from_that_set() {
     make_fixed_identity(home.path(), "me");
     run_pw(
         home.path(),
-        &["hd-secret", "me", "create", "b", "--symbols=!@#$"],
+        &["hd-secret", "create", "me", "b", "--symbols=!@#$"],
     );
     let secret = hd_secret_of(home.path(), "me", "b");
 
@@ -1925,7 +1926,7 @@ fn hd_a_custom_symbol_set_draws_only_from_that_set() {
         "the set must appear: {secret}"
     );
     // The stored recipe names the exact alphabet it used
-    let listed = run_pw(home.path(), &["hd-secret", "me", "list", "--verbose"]);
+    let listed = run_pw(home.path(), &["hd-secret", "list", "me", "--verbose"]);
     assert_eq!(
         table_cell(&listed, "b", 3),
         "--mode b58 --length 14 --symbols='!@#$' --suffix none"
@@ -1943,7 +1944,7 @@ fn hd_symbol_set_order_is_load_bearing() {
         make_fixed_identity(home.path(), "me");
         run_pw(
             home.path(),
-            &["hd-secret", "me", "create", "x", set, "--length", "44"],
+            &["hd-secret", "create", "me", "x", set, "--length", "44"],
         );
         (hd_secret_of(home.path(), "me", "x"), home)
     };
@@ -1960,25 +1961,25 @@ fn hd_symbols_rejects_collisions_non_ascii_and_the_empty_set() {
     // '1' is base58's zero digit, a collision would stop the rendering being
     // injective.
     sesh(home.path())
-        .args(["hd-secret", "me", "create", "x", "--symbols=1"])
+        .args(["hd-secret", "create", "me", "x", "--symbols=1"])
         .assert()
         .failure()
         .stderr(contains("already uses"));
     // Non-ASCII is refused cleanly, never a panic deep inside the encoder
     sesh(home.path())
-        .args(["hd-secret", "me", "create", "x", "--symbols=£"])
+        .args(["hd-secret", "create", "me", "x", "--symbols=£"])
         .assert()
         .failure()
         .stderr(contains("printable ASCII"));
     // `--symbols=` is not `--symbols`: it names the empty set
     sesh(home.path())
-        .args(["hd-secret", "me", "create", "x", "--symbols="])
+        .args(["hd-secret", "create", "me", "x", "--symbols="])
         .assert()
         .failure()
         .stderr(contains("must not be empty"));
     // A repeat inside the set is refused too
     sesh(home.path())
-        .args(["hd-secret", "me", "create", "x", "--symbols=!!"])
+        .args(["hd-secret", "create", "me", "x", "--symbols=!!"])
         .assert()
         .failure()
         .stderr(contains("repeats"));
@@ -1986,8 +1987,8 @@ fn hd_symbols_rejects_collisions_non_ascii_and_the_empty_set() {
     sesh(home.path())
         .args([
             "hd-secret",
-            "me",
             "create",
+            "me",
             "x",
             "--mode",
             "alpha",
@@ -1999,8 +2000,8 @@ fn hd_symbols_rejects_collisions_non_ascii_and_the_empty_set() {
     sesh(home.path())
         .args([
             "hd-secret",
-            "me",
             "create",
+            "me",
             "x",
             "--mode",
             "bip39",
@@ -2008,7 +2009,7 @@ fn hd_symbols_rejects_collisions_non_ascii_and_the_empty_set() {
         ])
         .assert()
         .failure();
-    assert!(run_pw(home.path(), &["hd-secret", "me", "list"]).contains("(no definitions)"));
+    assert!(run_pw(home.path(), &["hd-secret", "list", "me"]).contains("(no definitions)"));
 }
 
 #[test]
@@ -2020,15 +2021,15 @@ fn hd_symbols_may_hold_characters_the_mode_omits() {
     // The four characters base58 omits to avoid visual confusion
     run_pw(
         home.path(),
-        &["hd-secret", "me", "create", "a", "--symbols=0OIl"],
+        &["hd-secret", "create", "me", "a", "--symbols=0OIl"],
     );
     // hex's base alphabet is lowercase, so the uppercase digits are free
     run_pw(
         home.path(),
         &[
             "hd-secret",
-            "me",
             "create",
+            "me",
             "b",
             "--mode",
             "hex",
@@ -2038,7 +2039,7 @@ fn hd_symbols_may_hold_characters_the_mode_omits() {
     // ...and a quote is a legal password character; `describe()` gets no vote
     run_pw(
         home.path(),
-        &["hd-secret", "me", "create", "c", "--symbols='"],
+        &["hd-secret", "create", "me", "c", "--symbols='"],
     );
     for id in ["a", "b", "c"] {
         assert!(!hd_secret_of(home.path(), "me", id).is_empty());
@@ -2055,8 +2056,8 @@ fn hd_symbols_with_hex_loses_the_0x_prefix() {
         home.path(),
         &[
             "hd-secret",
-            "me",
             "create",
+            "me",
             "plain",
             "--mode",
             "hex",
@@ -2067,8 +2068,8 @@ fn hd_symbols_with_hex_loses_the_0x_prefix() {
         home.path(),
         &[
             "hd-secret",
-            "me",
             "create",
+            "me",
             "mixed",
             "--mode",
             "hex",
@@ -2089,8 +2090,8 @@ fn hd_mode_override_rejects_a_set_that_collides_with_the_overridden_alphabet() {
         home.path(),
         &[
             "hd-secret",
-            "me",
             "create",
+            "me",
             "x",
             "--mode",
             "b10",
@@ -2102,7 +2103,7 @@ fn hd_mode_override_rejects_a_set_that_collides_with_the_overridden_alphabet() {
     let clip = home.path().join("clip.txt");
     sesh_pw(home.path())
         .env("SESH_CLIPBOARD_CMD", format!("cat > {}", clip.display()))
-        .args(["hd-secret", "me", "copy", "x", "--mode", "hex"])
+        .args(["hd-secret", "copy", "me", "x", "--mode", "hex"])
         .assert()
         .failure()
         .stderr(contains("drop the --mode override"));
@@ -2114,13 +2115,13 @@ fn hd_rotate_switches_the_symbol_set_and_no_symbols_clears_it() {
     make_fixed_identity(home.path(), "me");
     run_pw(
         home.path(),
-        &["hd-secret", "me", "create", "x", "--symbols=!@"],
+        &["hd-secret", "create", "me", "x", "--symbols=!@"],
     );
 
     // A different set is a different alphabet, hence a different rendering
     let swapped = run_pw(
         home.path(),
-        &["hd-secret", "me", "rotate", "x", "--symbols=#$"],
+        &["hd-secret", "rotate", "me", "x", "--symbols=#$"],
     );
     assert_eq!(
         field(&swapped, "Params"),
@@ -2134,7 +2135,7 @@ fn hd_rotate_switches_the_symbol_set_and_no_symbols_clears_it() {
     // --no-symbols clears it entirely
     let cleared = run_pw(
         home.path(),
-        &["hd-secret", "me", "rotate", "x", "--no-symbols"],
+        &["hd-secret", "rotate", "me", "x", "--no-symbols"],
     );
     assert_eq!(
         field(&cleared, "Params"),
@@ -2188,14 +2189,14 @@ fn registry_create_show_list_roundtrip() {
     make_identity(home.path(), "me");
 
     // create prints details + fingerprint, never the secret
-    let created = run_pw(home.path(), &["hd-secret", "me", "create", "google.com"]);
+    let created = run_pw(home.path(), &["hd-secret", "create", "me", "google.com"]);
     assert_eq!(field(&created, "Epoch"), "1");
     let fpr = field(&created, "Fingerprint");
     assert!(!fpr.is_empty());
     assert!(field(&created, "Secret").contains("derived on demand"));
 
     // show repeats the same details
-    let shown = run_pw(home.path(), &["hd-secret", "me", "show", "google.com"]);
+    let shown = run_pw(home.path(), &["hd-secret", "show", "me", "google.com"]);
     assert_eq!(created, shown);
 
     // copy/reveal re-derive the secret from the stored epoch + params; create
@@ -2206,19 +2207,19 @@ fn registry_create_show_list_roundtrip() {
 
     // list says whose registry it is, then the table (fingerprint right of
     // params), never secrets.
-    let listed = run_pw(home.path(), &["hd-secret", "me", "list", "--verbose"]);
+    let listed = run_pw(home.path(), &["hd-secret", "list", "me", "--verbose"]);
     assert!(listed.starts_with("Personal: me\n"));
     assert_eq!(table_cell(&listed, "google.com", 2), "1");
     assert_eq!(table_cell(&listed, "google.com", 3), default_params_row());
     assert_eq!(table_cell(&listed, "google.com", 4), fpr);
     assert!(!listed.contains(&secret));
-    let plain = run_pw(home.path(), &["hd-secret", "me", "list"]);
+    let plain = run_pw(home.path(), &["hd-secret", "list", "me"]);
     assert!(!plain.contains("Params"), "{plain}");
     assert_eq!(table_cell(&plain, "google.com", 3), fpr);
 
     // A duplicate create errors (use rotate to change it)
     sesh_pw(home.path())
-        .args(["hd-secret", "me", "create", "google.com"])
+        .args(["hd-secret", "create", "me", "google.com"])
         .assert()
         .failure()
         .stderr(contains("already exists"));
@@ -2228,29 +2229,19 @@ fn registry_create_show_list_roundtrip() {
 fn registry_empty_list_placeholder() {
     let home = TempDir::new().unwrap();
     make_identity(home.path(), "me");
-    assert!(run_pw(home.path(), &["hd-secret", "me", "list"]).contains("(no definitions)"));
+    assert!(run_pw(home.path(), &["hd-secret", "list", "me"]).contains("(no definitions)"));
 }
 
 #[test]
-fn hd_bare_owner_shows_help() {
+fn hd_bare_owner_is_not_a_command() {
     let home = TempDir::new().unwrap();
     make_identity(home.path(), "me");
-    // A bare owner is not a command, the family help is shown instead
-    let assert = sesh(home.path())
+    // The grammar is verb-first: a bare owner is an unknown subcommand
+    sesh(home.path())
         .args(["hd-secret", "me"])
         .assert()
-        .failure();
-    let out = assert.get_output();
-    let all = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(all.contains("Usage"), "expected help output:\n{all}");
-    assert!(
-        all.contains("list"),
-        "help should mention the list subcommand:\n{all}"
-    );
+        .failure()
+        .stderr(contains("unrecognized subcommand"));
 }
 
 #[test]
@@ -2261,8 +2252,8 @@ fn registry_encrypted_at_rest() {
         home.path(),
         &[
             "hd-secret",
-            "me",
             "create",
+            "me",
             "supersecretlabel",
             "hiddenuser",
             "--suffix",
@@ -2281,11 +2272,11 @@ fn registry_encrypted_at_rest() {
 fn registry_rotate_is_monotonic_and_changes_secret() {
     let home = TempDir::new().unwrap();
     make_identity(home.path(), "me");
-    run_pw(home.path(), &["hd-secret", "me", "create", "x"]);
+    run_pw(home.path(), &["hd-secret", "create", "me", "x"]);
     let v1 = hd_secret_of(home.path(), "me", "x");
 
     // rotate prints the summary (no secret) and the confirmation
-    let v2 = run_pw(home.path(), &["hd-secret", "me", "rotate", "x"]);
+    let v2 = run_pw(home.path(), &["hd-secret", "rotate", "me", "x"]);
     assert!(v2.contains("Rotated to epoch 2"));
     assert_eq!(field(&v2, "Epoch"), "2");
     assert!(!v2.contains(&v1), "rotate must never print the secret");
@@ -2294,19 +2285,19 @@ fn registry_rotate_is_monotonic_and_changes_secret() {
     // An explicit epoch must strictly exceed the current one
     for epoch in ["2", "1"] {
         sesh_pw(home.path())
-            .args(["hd-secret", "me", "rotate", "x", "--epoch", epoch])
+            .args(["hd-secret", "rotate", "me", "x", "--epoch", epoch])
             .assert()
             .failure()
             .stderr(contains("Epoch must strictly increase"));
     }
     let v10 = run_pw(
         home.path(),
-        &["hd-secret", "me", "rotate", "x", "--epoch", "10"],
+        &["hd-secret", "rotate", "me", "x", "--epoch", "10"],
     );
     assert!(v10.contains("Rotated to epoch 10"));
 
     // show reflects the latest epoch
-    let shown = run_pw(home.path(), &["hd-secret", "me", "show", "x"]);
+    let shown = run_pw(home.path(), &["hd-secret", "show", "me", "x"]);
     assert_eq!(field(&shown, "Epoch"), "10");
     assert_eq!(field(&v10, "Fingerprint"), field(&shown, "Fingerprint"));
 }
@@ -2315,7 +2306,7 @@ fn registry_rotate_is_monotonic_and_changes_secret() {
 fn hd_rotate_dry_run_changes_nothing() {
     let home = TempDir::new().unwrap();
     make_identity(home.path(), "me");
-    run_pw(home.path(), &["hd-secret", "me", "create", "x"]); // epoch 1
+    run_pw(home.path(), &["hd-secret", "create", "me", "x"]); // epoch 1
     let secret = hd_secret_of(home.path(), "me", "x");
 
     // The dry run previews epoch 2 (and merged params) without storing
@@ -2323,8 +2314,8 @@ fn hd_rotate_dry_run_changes_nothing() {
         home.path(),
         &[
             "hd-secret",
-            "me",
             "rotate",
+            "me",
             "x",
             "--dry-run",
             "--mode",
@@ -2339,21 +2330,21 @@ fn hd_rotate_dry_run_changes_nothing() {
     assert!(dry.contains("dry run, keystore unchanged"));
 
     // The stored entry is untouched: still epoch 1, b58, same secret
-    let shown = run_pw(home.path(), &["hd-secret", "me", "show", "x"]);
+    let shown = run_pw(home.path(), &["hd-secret", "show", "me", "x"]);
     assert_eq!(field(&shown, "Epoch"), "1");
     assert_eq!(hd_secret_of(home.path(), "me", "x"), secret);
-    let listed = run_pw(home.path(), &["hd-secret", "me", "list", "--verbose"]);
+    let listed = run_pw(home.path(), &["hd-secret", "list", "me", "--verbose"]);
     assert_eq!(table_cell(&listed, "x", 3), default_params_row());
 
     // Group scope: the dry run also previews the share token, still unstored
     let homes = wire_group(&["a", "b"]);
     let (a, b) = (homes[0].path(), homes[1].path());
     form_group(a, b, "grp");
-    run_pw(a, &["hd-secret", "grp", "create", "vpn"]);
-    let dry = run_pw(a, &["hd-secret", "grp", "rotate", "vpn", "--dry-run"]);
+    run_pw(a, &["hd-secret", "create", "grp", "vpn"]);
+    let dry = run_pw(a, &["hd-secret", "rotate", "grp", "vpn", "--dry-run"]);
     assert!(!field(&dry, "Share token").is_empty());
     assert_eq!(
-        field(&run_pw(a, &["hd-secret", "grp", "show", "vpn"]), "Epoch"),
+        field(&run_pw(a, &["hd-secret", "show", "grp", "vpn"]), "Epoch"),
         "1"
     );
 }
@@ -2362,19 +2353,19 @@ fn hd_rotate_dry_run_changes_nothing() {
 fn registry_remove_tombstones_and_revive_advances_epoch() {
     let home = TempDir::new().unwrap();
     make_identity(home.path(), "me");
-    run_pw(home.path(), &["hd-secret", "me", "create", "x"]); // epoch 1
-    run_pw(home.path(), &["hd-secret", "me", "remove", "x"]); // tombstone epoch 2
+    run_pw(home.path(), &["hd-secret", "create", "me", "x"]); // epoch 1
+    run_pw(home.path(), &["hd-secret", "remove", "me", "x"]); // tombstone epoch 2
 
-    let listed = run_pw(home.path(), &["hd-secret", "me", "list"]);
+    let listed = run_pw(home.path(), &["hd-secret", "list", "me"]);
     assert!(listed.contains("(no definitions)"));
     sesh_pw(home.path())
-        .args(["hd-secret", "me", "show", "x"])
+        .args(["hd-secret", "show", "me", "x"])
         .assert()
         .failure()
         .stderr(contains("No stored definition"));
 
     // Re-creating revives strictly above the tombstone epoch
-    let revived = run_pw(home.path(), &["hd-secret", "me", "create", "x"]);
+    let revived = run_pw(home.path(), &["hd-secret", "create", "me", "x"]);
     assert_eq!(field(&revived, "Epoch"), "3");
 }
 
@@ -2384,10 +2375,10 @@ fn registry_remove_tombstones_and_revive_advances_epoch() {
 fn hd_show_hides_the_secret_and_dump_is_gone() {
     let home = TempDir::new().unwrap();
     make_identity(home.path(), "me");
-    let created = run_pw(home.path(), &["hd-secret", "me", "create", "site"]);
+    let created = run_pw(home.path(), &["hd-secret", "create", "me", "site"]);
     let secret = hd_secret_of(home.path(), "me", "site");
 
-    let shown = run_pw(home.path(), &["hd-secret", "me", "show", "site"]);
+    let shown = run_pw(home.path(), &["hd-secret", "show", "me", "site"]);
     for out in [&created, &shown] {
         assert!(
             !out.contains(&secret),
@@ -2399,7 +2390,7 @@ fn hd_show_hides_the_secret_and_dump_is_gone() {
 
     // dump no longer exists in this family
     sesh(home.path())
-        .args(["hd-secret", "me", "dump", "site"])
+        .args(["hd-secret", "dump", "me", "site"])
         .assert()
         .failure();
 }
@@ -2408,14 +2399,14 @@ fn hd_show_hides_the_secret_and_dump_is_gone() {
 fn hd_reveal_is_tty_only_and_never_writes_to_stdout() {
     let home = TempDir::new().unwrap();
     make_identity(home.path(), "me");
-    run_pw(home.path(), &["hd-secret", "me", "create", "site", "bob"]);
+    run_pw(home.path(), &["hd-secret", "create", "me", "site", "bob"]);
     let secret = hd_secret_of(home.path(), "me", "site");
 
     // reveal is structurally TTY-only: with piped stdin/stdout (as in tests) it
     // refuses outright, so it can never silently behave like the old `export`.
     // Nothing of the secret leaks to stdout on the refusal path.
     let assert = sesh(home.path())
-        .args(["hd-secret", "me", "reveal", "site"])
+        .args(["hd-secret", "reveal", "me", "site"])
         .assert()
         .failure()
         .stderr(contains("interactive terminal"));
@@ -2426,7 +2417,7 @@ fn hd_reveal_is_tty_only_and_never_writes_to_stdout() {
     );
 
     // The metadata is still reachable via `show` (never the secret)
-    let shown = run_pw(home.path(), &["hd-secret", "me", "show", "site"]);
+    let shown = run_pw(home.path(), &["hd-secret", "show", "me", "site"]);
     assert_eq!(field(&shown, "Id"), "site");
     assert_eq!(field(&shown, "User"), "bob");
     assert_eq!(field(&shown, "Epoch"), "1");
@@ -2437,13 +2428,13 @@ fn hd_reveal_is_tty_only_and_never_writes_to_stdout() {
 fn hd_copy_uses_clipboard_and_never_echoes() {
     let home = TempDir::new().unwrap();
     make_identity(home.path(), "me");
-    run_pw(home.path(), &["hd-secret", "me", "create", "site"]);
+    run_pw(home.path(), &["hd-secret", "create", "me", "site"]);
     let secret = hd_secret_of(home.path(), "me", "site");
 
     let clip = home.path().join("clip.txt");
     let out = sesh_pw(home.path())
         .env("SESH_CLIPBOARD_CMD", format!("cat > {}", clip.display()))
-        .args(["hd-secret", "me", "copy", "site"])
+        .args(["hd-secret", "copy", "me", "site"])
         .assert()
         .success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
@@ -2456,11 +2447,11 @@ fn hd_copy_uses_clipboard_and_never_echoes() {
 fn hd_copy_fails_cleanly_when_clipboard_tool_fails() {
     let home = TempDir::new().unwrap();
     make_identity(home.path(), "me");
-    run_pw(home.path(), &["hd-secret", "me", "create", "site"]);
+    run_pw(home.path(), &["hd-secret", "create", "me", "site"]);
     // The password is supplied, so the failure can only be the clipboard's
     sesh_pw(home.path())
         .env("SESH_CLIPBOARD_CMD", "exit 1")
-        .args(["hd-secret", "me", "copy", "site"])
+        .args(["hd-secret", "copy", "me", "site"])
         .assert()
         .failure()
         .stderr(contains("clipboard"));
@@ -2470,10 +2461,10 @@ fn hd_copy_fails_cleanly_when_clipboard_tool_fails() {
 fn hd_mode_override_is_display_only() {
     let home = TempDir::new().unwrap();
     make_identity(home.path(), "me");
-    run_pw(home.path(), &["hd-secret", "me", "create", "site"]); // stored: b58
+    run_pw(home.path(), &["hd-secret", "create", "me", "site"]); // stored: b58
     let b58 = hd_secret_of(home.path(), "me", "site");
     let fpr = field(
-        &run_pw(home.path(), &["hd-secret", "me", "show", "site"]),
+        &run_pw(home.path(), &["hd-secret", "show", "me", "site"]),
         "Fingerprint",
     );
 
@@ -2483,7 +2474,7 @@ fn hd_mode_override_is_display_only() {
     let clip = home.path().join("clip.txt");
     sesh_pw(home.path())
         .env("SESH_CLIPBOARD_CMD", format!("cat > {}", clip.display()))
-        .args(["hd-secret", "me", "copy", "site", "--mode", "hex"])
+        .args(["hd-secret", "copy", "me", "site", "--mode", "hex"])
         .assert()
         .success();
     let hex = std::fs::read_to_string(&clip).unwrap();
@@ -2498,7 +2489,7 @@ fn hd_mode_override_is_display_only() {
     // ...but is never persisted: stored params still say b58, the fingerprint
     // (over the raw child, not its encoding) is unchanged, and a plain copy
     // still yields b58.
-    let listed = run_pw(home.path(), &["hd-secret", "me", "list", "--verbose"]);
+    let listed = run_pw(home.path(), &["hd-secret", "list", "me", "--verbose"]);
     assert_eq!(table_cell(&listed, "site", 3), default_params_row());
     assert_eq!(table_cell(&listed, "site", 4), fpr);
     assert_eq!(hd_secret_of(home.path(), "me", "site"), b58);
@@ -2515,8 +2506,8 @@ fn registry_group_scope_members_agree() {
     // Both members create the same definition independently -> same secret
     // (same K, same (id, user, epoch)) and the same fingerprint, straight
     // from create's output, proving the derivation is member-independent.
-    let a_created = run_pw(a, &["hd-secret", "grp", "create", "vpn"]);
-    let b_created = run_pw(b, &["hd-secret", "grp", "create", "vpn"]);
+    let a_created = run_pw(a, &["hd-secret", "create", "grp", "vpn"]);
+    let b_created = run_pw(b, &["hd-secret", "create", "grp", "vpn"]);
     assert_eq!(
         field(&a_created, "Fingerprint"),
         field(&b_created, "Fingerprint")
@@ -2529,7 +2520,7 @@ fn registry_group_scope_members_agree() {
     assert_eq!(a_secret, b_secret);
 
     // A personal entry with the same (id, epoch) derives under s_dh, not K
-    let personal = run_pw(a, &["hd-secret", "me", "create", "vpn"]);
+    let personal = run_pw(a, &["hd-secret", "create", "me", "vpn"]);
     assert_ne!(
         field(&personal, "Fingerprint"),
         field(&a_created, "Fingerprint")
@@ -2537,13 +2528,13 @@ fn registry_group_scope_members_agree() {
 
     // list headers name the owner kind, and show leads with the Group row for
     // group-owned entries (absent for personal ones).
-    let group_list = run_pw(a, &["hd-secret", "grp", "list"]);
+    let group_list = run_pw(a, &["hd-secret", "list", "grp"]);
     assert!(group_list.starts_with("Group: grp\n"));
     assert_eq!(
-        field(&run_pw(a, &["hd-secret", "grp", "show", "vpn"]), "Group"),
+        field(&run_pw(a, &["hd-secret", "show", "grp", "vpn"]), "Group"),
         "grp"
     );
-    assert!(!run_pw(a, &["hd-secret", "me", "show", "vpn"]).contains("Group:"));
+    assert!(!run_pw(a, &["hd-secret", "show", "me", "vpn"]).contains("Group:"));
 }
 
 #[test]
@@ -2552,29 +2543,29 @@ fn registry_share_reshares_stored_entry() {
     let (a, b) = (homes[0].path(), homes[1].path());
     form_group(a, b, "grp");
 
-    run_pw(a, &["hd-secret", "grp", "create", "wifi"]);
+    run_pw(a, &["hd-secret", "create", "grp", "wifi"]);
     let secret = hd_secret_of(a, "grp", "wifi");
-    let shared = run_pw(a, &["hd-secret", "grp", "share", "wifi"]);
+    let shared = run_pw(a, &["hd-secret", "share", "grp", "wifi"]);
     // Fingerprint + share token only, never the secret
     assert_eq!(shared.lines().count(), 2);
     assert!(!field(&shared, "Share token").is_empty());
     assert!(!shared.contains(&secret));
     // The fingerprint matches show's, and the shared token round-trips
-    let shown = run_pw(a, &["hd-secret", "grp", "show", "wifi"]);
+    let shown = run_pw(a, &["hd-secret", "show", "grp", "wifi"]);
     assert_eq!(field(&shared, "Fingerprint"), field(&shown, "Fingerprint"));
     let applied = apply_ok(b, &field(&shared, "Share token"), "y\n");
     assert!(applied.contains("Applied NEW"));
 
     // share errors if the entry is not stored
     sesh_pw(a)
-        .args(["hd-secret", "grp", "share", "ghost"])
+        .args(["hd-secret", "share", "grp", "ghost"])
         .assert()
         .failure()
         .stderr(contains("No stored definition"));
     // share is group-only: personal definitions are local-only
-    run_pw(a, &["hd-secret", "me", "create", "wifi"]);
+    run_pw(a, &["hd-secret", "create", "me", "wifi"]);
     sesh_pw(a)
-        .args(["hd-secret", "me", "share", "wifi"])
+        .args(["hd-secret", "share", "me", "wifi"])
         .assert()
         .failure()
         .stderr(contains("local-only"));
@@ -2584,24 +2575,24 @@ fn registry_share_reshares_stored_entry() {
 fn registry_user_disambiguates_and_is_required_when_ambiguous() {
     let home = TempDir::new().unwrap();
     make_identity(home.path(), "me");
-    let one = run_pw(home.path(), &["hd-secret", "me", "create", "x", "alice"]);
-    let two = run_pw(home.path(), &["hd-secret", "me", "create", "x", "bob"]);
+    let one = run_pw(home.path(), &["hd-secret", "create", "me", "x", "alice"]);
+    let two = run_pw(home.path(), &["hd-secret", "create", "me", "x", "bob"]);
     assert_ne!(field(&one, "Fingerprint"), field(&two, "Fingerprint"));
 
     // Ambiguous without a user
     sesh_pw(home.path())
-        .args(["hd-secret", "me", "show", "x"])
+        .args(["hd-secret", "show", "me", "x"])
         .assert()
         .failure()
         .stderr(contains("matches multiple entries"));
     // Disambiguated by user: show matches create's fingerprint, and copy
     // (with the user) yields a non-empty secret.
-    let shown = run_pw(home.path(), &["hd-secret", "me", "show", "x", "alice"]);
+    let shown = run_pw(home.path(), &["hd-secret", "show", "me", "x", "alice"]);
     assert_eq!(field(&one, "Fingerprint"), field(&shown, "Fingerprint"));
     let clip = home.path().join("clip.txt");
     sesh_pw(home.path())
         .env("SESH_CLIPBOARD_CMD", format!("cat > {}", clip.display()))
-        .args(["hd-secret", "me", "copy", "x", "alice"])
+        .args(["hd-secret", "copy", "me", "x", "alice"])
         .assert()
         .success();
     assert!(!std::fs::read_to_string(&clip).unwrap().is_empty());
@@ -2621,10 +2612,10 @@ fn apply_ok(home: &Path, token: &str, answers: &str) -> String {
     String::from_utf8(out.get_output().stdout.clone()).unwrap()
 }
 
-// The share token for a stored group definition (via `hd-secret ... share`)
+// The share token for a stored group definition (via `hd-secret share ...`)
 fn share_token(home: &Path, group: &str, id: &str) -> String {
     field(
-        &run_pw(home, &["hd-secret", group, "share", id]),
+        &run_pw(home, &["hd-secret", "share", group, id]),
         "Share token",
     )
 }
@@ -2635,7 +2626,7 @@ fn share_token(home: &Path, group: &str, id: &str) -> String {
 // tool receives exactly the secret bytes on stdin.
 fn hd_secret_of(home: &Path, owner: &str, id: &str) -> String {
     let clip = home.join(format!(".clip-{owner}-{id}"));
-    copy_secret(home, &clip, &["hd-secret", owner, "copy", id])
+    copy_secret(home, &clip, &["hd-secret", "copy", owner, id])
 }
 
 #[test]
@@ -2646,7 +2637,7 @@ fn apply_syncs_create_and_rotate_between_members() {
 
     // A creates and shares; B applies the token -> both derive the same secret.
     // A brand-new entry shows the summary but no change block.
-    run_pw(a, &["hd-secret", "grp", "create", "vpn"]);
+    run_pw(a, &["hd-secret", "create", "grp", "vpn"]);
     let a_before = hd_secret_of(a, "grp", "vpn");
     let applied = apply_ok(b, &share_token(a, "grp", "vpn"), "y\n");
     assert!(applied.contains("Applied NEW"));
@@ -2656,7 +2647,7 @@ fn apply_syncs_create_and_rotate_between_members() {
 
     // B rotates (new params); A applies -> both converge. The apply shows the
     // change block with only the fields that differ.
-    let rotated = run_pw(b, &["hd-secret", "grp", "rotate", "vpn", "--mode", "hex"]);
+    let rotated = run_pw(b, &["hd-secret", "rotate", "grp", "vpn", "--mode", "hex"]);
     assert_eq!(field(&rotated, "Group"), "grp");
     let tok2 = field(&rotated, "Share token");
     let applied = apply_ok(a, &tok2, "y\n");
@@ -2686,14 +2677,14 @@ fn apply_carries_a_custom_symbol_set_across_the_group() {
     form_group(a, b, "grp");
 
     // A signed share token carries the set verbatim; B renders the same string
-    run_pw(a, &["hd-secret", "grp", "create", "vpn", "--symbols=!@#$"]);
+    run_pw(a, &["hd-secret", "create", "grp", "vpn", "--symbols=!@#$"]);
     let a_secret = hd_secret_of(a, "grp", "vpn");
     let applied = apply_ok(b, &share_token(a, "grp", "vpn"), "y\n");
     assert!(applied.contains("Applied NEW"));
     assert_eq!(a_secret, hd_secret_of(b, "grp", "vpn"));
     assert_eq!(
         table_cell(
-            &run_pw(b, &["hd-secret", "grp", "list", "--verbose"]),
+            &run_pw(b, &["hd-secret", "list", "grp", "--verbose"]),
             "vpn",
             3
         ),
@@ -2702,7 +2693,7 @@ fn apply_carries_a_custom_symbol_set_across_the_group() {
 
     // The `apply` diff prints the sets verbatim. It is the surface on which a
     // we tells two sets apart, so it must never collapse them to yes/no.
-    let rotated = run_pw(a, &["hd-secret", "grp", "rotate", "vpn", "--symbols=%^"]);
+    let rotated = run_pw(a, &["hd-secret", "rotate", "grp", "vpn", "--symbols=%^"]);
     let diff = apply_ok(b, &field(&rotated, "Share token"), "y\n");
     assert!(
         diff.contains("symbols: \"!@#$\" → \"%^\""),
@@ -2763,7 +2754,7 @@ fn apply_rejects_member_signed_token_with_invalid_params() {
         .failure()
         .stderr(contains("share token carries invalid params"));
     // Nothing was adopted
-    assert!(run_pw(a, &["hd-secret", "grp", "list"]).contains("(no definitions)"));
+    assert!(run_pw(a, &["hd-secret", "list", "grp"]).contains("(no definitions)"));
 }
 
 #[test]
@@ -2802,14 +2793,14 @@ fn apply_ignores_already_applied_and_stale() {
     let (a, b) = (homes[0].path(), homes[1].path());
     form_group(a, b, "grp");
 
-    run_pw(a, &["hd-secret", "grp", "create", "x"]);
+    run_pw(a, &["hd-secret", "create", "grp", "x"]);
     let tok1 = share_token(a, "grp", "x");
     apply_ok(b, &tok1, "y\n");
     // Re-applying the same token is a no-op (no prompt needed)
     assert!(apply_ok(b, &tok1, "").contains("Already up to date"));
 
     // After adopting a rotation, the original token is stale
-    let rotated = run_pw(a, &["hd-secret", "grp", "rotate", "x"]);
+    let rotated = run_pw(a, &["hd-secret", "rotate", "grp", "x"]);
     apply_ok(b, &field(&rotated, "Share token"), "y\n");
     assert!(apply_ok(b, &tok1, "").contains("Ignored stale change"));
 }
@@ -2819,7 +2810,7 @@ fn apply_declined_leaves_registry_unchanged() {
     let homes = wire_group(&["a", "b"]);
     let (a, b) = (homes[0].path(), homes[1].path());
     form_group(a, b, "grp");
-    run_pw(a, &["hd-secret", "grp", "create", "x"]);
+    run_pw(a, &["hd-secret", "create", "grp", "x"]);
     let tok = share_token(a, "grp", "x");
     // Declining the Y/N prompt fails and stores nothing
     sesh(b)
@@ -2828,7 +2819,7 @@ fn apply_declined_leaves_registry_unchanged() {
         .assert()
         .failure();
     sesh_pw(b)
-        .args(["hd-secret", "grp", "show", "x"])
+        .args(["hd-secret", "show", "grp", "x"])
         .assert()
         .failure()
         .stderr(contains("No stored definition"));
@@ -2842,8 +2833,8 @@ fn apply_same_epoch_conflict_prompts_keep_or_use() {
 
     // Concurrent creates of the same (id, user) with different params -> both
     // at epoch 1 with different content (same raw child, different rendering).
-    run_pw(a, &["hd-secret", "grp", "create", "x", "--mode", "b58"]);
-    run_pw(b, &["hd-secret", "grp", "create", "x", "--mode", "hex"]);
+    run_pw(a, &["hd-secret", "create", "grp", "x", "--mode", "b58"]);
+    run_pw(b, &["hd-secret", "create", "grp", "x", "--mode", "hex"]);
     let a_secret = hd_secret_of(a, "grp", "x");
     let b_secret = hd_secret_of(b, "grp", "x");
     assert_ne!(a_secret, b_secret);
@@ -2861,9 +2852,9 @@ fn apply_same_epoch_conflict_prompts_keep_or_use() {
 
     // [a] aborts with a failure exit (B now agrees with A, so make a fresh
     // conflict by rotating both sides independently to the same next epoch).
-    let a_rot = run_pw(a, &["hd-secret", "grp", "rotate", "x", "--mode", "b58"]);
+    let a_rot = run_pw(a, &["hd-secret", "rotate", "grp", "x", "--mode", "b58"]);
     // Rotating into alpha drops the carried symbol set (announced on stderr)
-    run_pw(b, &["hd-secret", "grp", "rotate", "x", "--mode", "alpha"]);
+    run_pw(b, &["hd-secret", "rotate", "grp", "x", "--mode", "alpha"]);
     sesh(b)
         .args(["hd-secret", "apply", &field(&a_rot, "Share token")])
         .write_stdin(format!("{PW}\na\n"))
@@ -2882,8 +2873,8 @@ fn apply_conflict_shows_metadata_only_never_the_secret() {
     let (a, b) = (homes[0].path(), homes[1].path());
     form_group(a, b, "grp");
 
-    run_pw(a, &["hd-secret", "grp", "create", "x", "--mode", "b58"]);
-    run_pw(b, &["hd-secret", "grp", "create", "x", "--mode", "hex"]);
+    run_pw(a, &["hd-secret", "create", "grp", "x", "--mode", "b58"]);
+    run_pw(b, &["hd-secret", "create", "grp", "x", "--mode", "hex"]);
     let a_secret = hd_secret_of(a, "grp", "x");
     let b_secret = hd_secret_of(b, "grp", "x");
     assert_ne!(a_secret, b_secret);
@@ -2941,12 +2932,12 @@ fn apply_remove_tombstone_blocks_stale_create() {
     let (a, b) = (homes[0].path(), homes[1].path());
     form_group(a, b, "grp");
 
-    run_pw(a, &["hd-secret", "grp", "create", "x"]);
+    run_pw(a, &["hd-secret", "create", "grp", "x"]);
     let create_tok = share_token(a, "grp", "x");
     apply_ok(b, &create_tok, "y\n");
 
     // A removes; B applies the tombstone
-    let removed = run_pw(a, &["hd-secret", "grp", "remove", "x"]);
+    let removed = run_pw(a, &["hd-secret", "remove", "grp", "x"]);
     let applied = apply_ok(b, &field(&removed, "Share token"), "y\n");
     assert!(applied.contains("Applied REMOVE"));
 
@@ -2963,14 +2954,14 @@ fn apply_remove_tombstone_blocks_stale_create() {
         );
     }
     sesh_pw(b)
-        .args(["hd-secret", "grp", "show", "x"])
+        .args(["hd-secret", "show", "grp", "x"])
         .assert()
         .failure()
         .stderr(contains("No stored definition"));
 
     // Replaying the original (stale) create cannot resurrect the entry
     assert!(apply_ok(b, &create_tok, "").contains("Ignored stale change"));
-    let listed = run_pw(b, &["hd-secret", "grp", "list"]);
+    let listed = run_pw(b, &["hd-secret", "list", "grp"]);
     assert!(listed.contains("(no definitions)"));
 }
 
@@ -3012,7 +3003,7 @@ fn apply_rejects_token_for_unknown_group() {
         ],
     );
 
-    run_pw(a, &["hd-secret", "grp", "create", "x"]);
+    run_pw(a, &["hd-secret", "create", "grp", "x"]);
     let tok = share_token(a, "grp", "x");
     sesh(c)
         .args(["hd-secret", "apply", &tok])
@@ -3044,7 +3035,7 @@ fn encrypted_identity_password_roundtrip() {
     assert!(field(&shown, "Private key").contains("encrypted"));
     // hd-secret create needs the password to unlock the seed (piped once)
     let good = sesh(home.path())
-        .args(["hd-secret", "me", "create", "x"])
+        .args(["hd-secret", "create", "me", "x"])
         .write_stdin("s3cret\n")
         .assert()
         .success();
@@ -3053,7 +3044,7 @@ fn encrypted_identity_password_roundtrip() {
         .is_empty());
     // Wrong password fails
     sesh(home.path())
-        .args(["hd-secret", "me", "show", "x"])
+        .args(["hd-secret", "show", "me", "x"])
         .write_stdin("wrong\n")
         .assert()
         .failure();
@@ -3157,7 +3148,7 @@ fn keypair_mnemonic_recovers_keypair_owned_hd_secrets() {
     import_mnemonic(h1.path(), "me", ZERO_MNEMONIC);
     run_pw(
         h1.path(),
-        &["hd-secret", "me", "create", "google.com", "--length", "16"],
+        &["hd-secret", "create", "me", "google.com", "--length", "16"],
     );
     let s1 = hd_secret_of(h1.path(), "me", "google.com");
 
@@ -3165,7 +3156,7 @@ fn keypair_mnemonic_recovers_keypair_owned_hd_secrets() {
     import_mnemonic(h2.path(), "me", ZERO_MNEMONIC);
     run_pw(
         h2.path(),
-        &["hd-secret", "me", "create", "google.com", "--length", "16"],
+        &["hd-secret", "create", "me", "google.com", "--length", "16"],
     );
     let s2 = hd_secret_of(h2.path(), "me", "google.com");
     assert_eq!(s1, s2, "recovered keypair reproduces the same hd-secret");
@@ -3184,7 +3175,7 @@ fn keypair_mnemonic_can_be_encrypted_and_unlocks() {
     assert!(field(&shown, "Private key").contains("encrypted"));
     // The imported (encrypted) seed unlocks with that password
     sesh(home.path())
-        .args(["hd-secret", "me", "create", "x"])
+        .args(["hd-secret", "create", "me", "x"])
         .write_stdin("pw\n")
         .assert()
         .success();
@@ -3458,7 +3449,7 @@ fn restore_into_existing_empty_target_succeeds() {
     // un-initialized) directory. Restore is allowed to populate a target.
     let src = TempDir::new().unwrap();
     make_identity(src.path(), "me");
-    run_pw(src.path(), &["hd-secret", "me", "create", "site"]);
+    run_pw(src.path(), &["hd-secret", "create", "me", "site"]);
     let backup_file = src.path().join("b.sesh");
     let backup_arg = backup_file.to_str().unwrap();
     sesh(src.path())
@@ -3475,7 +3466,7 @@ fn restore_into_existing_empty_target_succeeds() {
         .success()
         .stdout(contains("Restored"));
     // The restored store is usable straight away (its marker came in the bundle)
-    let shown = run_pw(dst.path(), &["hd-secret", "me", "show", "site"]);
+    let shown = run_pw(dst.path(), &["hd-secret", "show", "me", "site"]);
     assert_eq!(field(&shown, "Id"), "site");
 }
 
@@ -3527,22 +3518,22 @@ fn recover_reproduces_a_removed_password_byte_for_byte() {
     let sink = TempDir::new().unwrap();
     make_identity(home.path(), "me");
 
-    run_pw(home.path(), &["hd-secret", "me", "create", "bank"]); // epoch 1
+    run_pw(home.path(), &["hd-secret", "create", "me", "bank"]); // epoch 1
     let original = copy_secret(
         home.path(),
         &sink.path().join("a"),
-        &["hd-secret", "me", "copy", "bank"],
+        &["hd-secret", "copy", "me", "bank"],
     );
     assert!(!original.is_empty());
 
-    run_pw(home.path(), &["hd-secret", "me", "remove", "bank"]); // tombstone at 2
-    run_pw(home.path(), &["hd-secret", "me", "create", "bank"]); // revived at 3
+    run_pw(home.path(), &["hd-secret", "remove", "me", "bank"]); // tombstone at 2
+    run_pw(home.path(), &["hd-secret", "create", "me", "bank"]); // revived at 3
 
     // The revived entry is a different password: same recipe, new epoch
     let revived = copy_secret(
         home.path(),
         &sink.path().join("b"),
-        &["hd-secret", "me", "copy", "bank"],
+        &["hd-secret", "copy", "me", "bank"],
     );
     assert_ne!(
         original, revived,
@@ -3553,7 +3544,7 @@ fn recover_reproduces_a_removed_password_byte_for_byte() {
     let recovered = copy_secret(
         home.path(),
         &sink.path().join("c"),
-        &["hd-secret", "me", "copy", "bank", "--recover", "1"],
+        &["hd-secret", "copy", "me", "bank", "--recover", "1"],
     );
     assert_eq!(original, recovered);
 }
@@ -3565,14 +3556,14 @@ fn recover_leaves_the_keystore_byte_identical() {
     let home = TempDir::new().unwrap();
     let sink = TempDir::new().unwrap();
     make_identity(home.path(), "me");
-    run_pw(home.path(), &["hd-secret", "me", "create", "bank"]);
-    run_pw(home.path(), &["hd-secret", "me", "rotate", "bank"]); // epoch 2
+    run_pw(home.path(), &["hd-secret", "create", "me", "bank"]);
+    run_pw(home.path(), &["hd-secret", "rotate", "me", "bank"]); // epoch 2
 
     let before = tree_snapshot(home.path());
     copy_secret(
         home.path(),
         &sink.path().join("a"),
-        &["hd-secret", "me", "copy", "bank", "--recover", "1"],
+        &["hd-secret", "copy", "me", "bank", "--recover", "1"],
     );
     assert_eq!(before, tree_snapshot(home.path()));
 }
@@ -3591,8 +3582,8 @@ fn recover_uses_the_archived_recipe_not_the_current_params() {
         home.path(),
         &[
             "hd-secret",
-            "me",
             "create",
+            "me",
             "bank",
             "--mode",
             "b58",
@@ -3604,7 +3595,7 @@ fn recover_uses_the_archived_recipe_not_the_current_params() {
     let original = copy_secret(
         home.path(),
         &sink.path().join("a"),
-        &["hd-secret", "me", "copy", "bank"],
+        &["hd-secret", "copy", "me", "bank"],
     );
     assert_eq!(original.len(), 14);
 
@@ -3613,8 +3604,8 @@ fn recover_uses_the_archived_recipe_not_the_current_params() {
         home.path(),
         &[
             "hd-secret",
-            "me",
             "rotate",
+            "me",
             "bank",
             "--mode",
             "hex",
@@ -3627,7 +3618,7 @@ fn recover_uses_the_archived_recipe_not_the_current_params() {
     let recovered = copy_secret(
         home.path(),
         &sink.path().join("b"),
-        &["hd-secret", "me", "copy", "bank", "--recover", "1"],
+        &["hd-secret", "copy", "me", "bank", "--recover", "1"],
     );
     assert_eq!(
         recovered, original,
@@ -3648,18 +3639,18 @@ fn recover_uses_the_archived_recipe_not_the_current_params() {
 fn recover_refuses_an_epoch_it_has_no_recipe_for() {
     let home = TempDir::new().unwrap();
     make_identity(home.path(), "me");
-    run_pw(home.path(), &["hd-secret", "me", "create", "bank"]); // epoch 1 only
+    run_pw(home.path(), &["hd-secret", "create", "me", "bank"]); // epoch 1 only
 
     for epoch in ["0", "2", "9999"] {
         sesh_pw(home.path())
-            .args(["hd-secret", "me", "copy", "bank", "--recover", epoch])
+            .args(["hd-secret", "copy", "me", "bank", "--recover", epoch])
             .assert()
             .failure()
             .stderr(contains("No recorded recipe").and(contains(epoch)));
     }
     // A non-numeric epoch is a usage error, not a panic
     sesh_pw(home.path())
-        .args(["hd-secret", "me", "copy", "bank", "--recover", "none"])
+        .args(["hd-secret", "copy", "me", "bank", "--recover", "none"])
         .assert()
         .failure()
         .stderr(contains("--recover takes an epoch"));
@@ -3672,18 +3663,18 @@ fn recover_refuses_an_epoch_it_has_no_recipe_for() {
 fn recover_rejects_the_tombstones_own_epoch() {
     let home = TempDir::new().unwrap();
     make_identity(home.path(), "me");
-    run_pw(home.path(), &["hd-secret", "me", "create", "bank"]); // epoch 1
-    run_pw(home.path(), &["hd-secret", "me", "remove", "bank"]); // tombstone at 2
+    run_pw(home.path(), &["hd-secret", "create", "me", "bank"]); // epoch 1
+    run_pw(home.path(), &["hd-secret", "remove", "me", "bank"]); // tombstone at 2
 
     sesh_pw(home.path())
-        .args(["hd-secret", "me", "copy", "bank", "--recover", "2"])
+        .args(["hd-secret", "copy", "me", "bank", "--recover", "2"])
         .assert()
         .failure()
         .stderr(contains("No recorded recipe"));
     // Epoch 1 - the one the tombstone's params actually formatted (works)
     sesh_pw(home.path())
         .env("SESH_CLIPBOARD_CMD", "cat > /dev/null")
-        .args(["hd-secret", "me", "copy", "bank", "--recover", "1"])
+        .args(["hd-secret", "copy", "me", "bank", "--recover", "1"])
         .assert()
         .success();
 }
@@ -3695,23 +3686,23 @@ fn recover_at_the_current_epoch_is_a_plain_read() {
     let home = TempDir::new().unwrap();
     let sink = TempDir::new().unwrap();
     make_identity(home.path(), "me");
-    run_pw(home.path(), &["hd-secret", "me", "create", "bank"]); // epoch 1
+    run_pw(home.path(), &["hd-secret", "create", "me", "bank"]); // epoch 1
 
     let plain = copy_secret(
         home.path(),
         &sink.path().join("a"),
-        &["hd-secret", "me", "copy", "bank"],
+        &["hd-secret", "copy", "me", "bank"],
     );
     let at_one = copy_secret(
         home.path(),
         &sink.path().join("b"),
-        &["hd-secret", "me", "copy", "bank", "--recover", "1"],
+        &["hd-secret", "copy", "me", "bank", "--recover", "1"],
     );
     assert_eq!(plain, at_one);
 
     let shown = run_pw(
         home.path(),
-        &["hd-secret", "me", "show", "bank", "--recover", "1"],
+        &["hd-secret", "show", "me", "bank", "--recover", "1"],
     );
     assert!(
         !shown.contains("archived recipe"),
@@ -3727,16 +3718,16 @@ fn show_recover_marks_a_superseded_recipe() {
     make_identity(home.path(), "me");
     run_pw(
         home.path(),
-        &["hd-secret", "me", "create", "bank", "--mode", "b58"],
+        &["hd-secret", "create", "me", "bank", "--mode", "b58"],
     );
     run_pw(
         home.path(),
-        &["hd-secret", "me", "rotate", "bank", "--mode", "hex"],
+        &["hd-secret", "rotate", "me", "bank", "--mode", "hex"],
     );
 
     let shown = run_pw(
         home.path(),
-        &["hd-secret", "me", "show", "bank", "--recover", "1"],
+        &["hd-secret", "show", "me", "bank", "--recover", "1"],
     );
     assert_eq!(field(&shown, "Epoch"), "1");
     assert!(
@@ -3749,7 +3740,7 @@ fn show_recover_marks_a_superseded_recipe() {
     );
 
     // The current entry is epoch 2 and is not marked
-    let current = run_pw(home.path(), &["hd-secret", "me", "show", "bank"]);
+    let current = run_pw(home.path(), &["hd-secret", "show", "me", "bank"]);
     assert_eq!(field(&current, "Epoch"), "2");
     assert!(!current.contains("archived recipe"));
 }
@@ -3762,18 +3753,18 @@ fn list_archived_shows_superseded_recipes_and_plain_list_does_not() {
     make_identity(home.path(), "me");
     run_pw(
         home.path(),
-        &["hd-secret", "me", "create", "bank", "--mode", "b58"],
+        &["hd-secret", "create", "me", "bank", "--mode", "b58"],
     );
-    run_pw(home.path(), &["hd-secret", "me", "remove", "bank"]); // archives epoch 1
+    run_pw(home.path(), &["hd-secret", "remove", "me", "bank"]); // archives epoch 1
 
     // The removed entry is invisible to a plain list...
-    let plain = run_pw(home.path(), &["hd-secret", "me", "list"]);
+    let plain = run_pw(home.path(), &["hd-secret", "list", "me"]);
     assert!(plain.contains("(no definitions)"), "{plain}");
 
     // ...and its epoch and recipe are readable under --archived
     let archived = run_pw(
         home.path(),
-        &["hd-secret", "me", "list", "--archived", "--verbose"],
+        &["hd-secret", "list", "me", "--archived", "--verbose"],
     );
     assert_eq!(table_cell(&archived, "bank", 2), "1");
     assert!(archived.contains("--mode b58"), "full params:\n{archived}");
@@ -3785,7 +3776,7 @@ fn list_archived_shows_superseded_recipes_and_plain_list_does_not() {
     // `--removed` is the same flag under the name a user reaches for first
     let removed = run_pw(
         home.path(),
-        &["hd-secret", "me", "list", "--removed", "--verbose"],
+        &["hd-secret", "list", "me", "--removed", "--verbose"],
     );
     assert_eq!(removed, archived);
 }
@@ -3795,9 +3786,9 @@ fn list_archived_shows_superseded_recipes_and_plain_list_does_not() {
 fn list_archived_is_empty_until_something_is_superseded() {
     let home = TempDir::new().unwrap();
     make_identity(home.path(), "me");
-    run_pw(home.path(), &["hd-secret", "me", "create", "bank"]);
+    run_pw(home.path(), &["hd-secret", "create", "me", "bank"]);
 
-    let archived = run_pw(home.path(), &["hd-secret", "me", "list", "--archived"]);
+    let archived = run_pw(home.path(), &["hd-secret", "list", "me", "--archived"]);
     assert!(archived.contains("(no archived recipes)"), "{archived}");
 }
 
@@ -3812,33 +3803,33 @@ fn the_fingerprint_does_not_cover_params() {
     make_identity(home.path(), "me");
     run_pw(
         home.path(),
-        &["hd-secret", "me", "create", "bank", "--mode", "b58"],
+        &["hd-secret", "create", "me", "bank", "--mode", "b58"],
     );
 
     // Two renderings of one epoch's secret, under different params
     let stored = copy_secret(
         home.path(),
         &sink.path().join("a"),
-        &["hd-secret", "me", "copy", "bank"],
+        &["hd-secret", "copy", "me", "bank"],
     );
     let other = copy_secret(
         home.path(),
         &sink.path().join("b"),
-        &["hd-secret", "me", "copy", "bank", "--mode", "hex"],
+        &["hd-secret", "copy", "me", "bank", "--mode", "hex"],
     );
     assert_ne!(stored, other, "different params render different passwords");
 
     // Yet the fingerprint the user is invited to compare is identical, because
     // it is taken over the child scalar, which params never enter.
     let fpr = field(
-        &run_pw(home.path(), &["hd-secret", "me", "show", "bank"]),
+        &run_pw(home.path(), &["hd-secret", "show", "me", "bank"]),
         "Fingerprint",
     );
     assert!(!fpr.is_empty());
     let fpr_again = field(
         &run_pw(
             home.path(),
-            &["hd-secret", "me", "show", "bank", "--recover", "1"],
+            &["hd-secret", "show", "me", "bank", "--recover", "1"],
         ),
         "Fingerprint",
     );
@@ -3852,9 +3843,9 @@ fn the_fingerprint_does_not_cover_params() {
 fn share_has_no_recover_flag() {
     let home = TempDir::new().unwrap();
     make_identity(home.path(), "me");
-    run_pw(home.path(), &["hd-secret", "me", "create", "bank"]);
+    run_pw(home.path(), &["hd-secret", "create", "me", "bank"]);
     sesh_pw(home.path())
-        .args(["hd-secret", "me", "share", "bank", "--recover", "1"])
+        .args(["hd-secret", "share", "me", "bank", "--recover", "1"])
         .assert()
         .failure();
 }
@@ -3873,8 +3864,8 @@ fn a_peer_recovers_a_removed_password_from_the_token_it_applied() {
         a,
         &[
             "hd-secret",
-            "grp",
             "create",
+            "grp",
             "bank",
             "--mode",
             "b58",
@@ -3892,13 +3883,13 @@ fn a_peer_recovers_a_removed_password_from_the_token_it_applied() {
     );
 
     // A removes and hands B the removal token; B applies it
-    let removed = run_pw(a, &["hd-secret", "grp", "remove", "bank"]);
+    let removed = run_pw(a, &["hd-secret", "remove", "grp", "bank"]);
     apply_ok(b, &field(&removed, "Share token"), "y\n");
 
     // The definition is gone on both sides...
     for h in [a, b] {
         sesh_pw(h)
-            .args(["hd-secret", "grp", "show", "bank"])
+            .args(["hd-secret", "show", "grp", "bank"])
             .assert()
             .failure()
             .stderr(contains("No stored definition"));
@@ -3909,12 +3900,12 @@ fn a_peer_recovers_a_removed_password_from_the_token_it_applied() {
     let a_rec = copy_secret(
         a,
         &a.join(".rec"),
-        &["hd-secret", "grp", "copy", "bank", "--recover", "1"],
+        &["hd-secret", "copy", "grp", "bank", "--recover", "1"],
     );
     let b_rec = copy_secret(
         b,
         &b.join(".rec"),
-        &["hd-secret", "grp", "copy", "bank", "--recover", "1"],
+        &["hd-secret", "copy", "grp", "bank", "--recover", "1"],
     );
     assert_eq!(a_rec, original);
     assert_eq!(b_rec, original);
@@ -3929,11 +3920,11 @@ fn a_peer_that_never_saw_the_entry_cannot_recover_it() {
     form_group(a, b, "grp");
 
     // A creates and removes without ever sharing either token
-    run_pw(a, &["hd-secret", "grp", "create", "bank"]);
-    run_pw(a, &["hd-secret", "grp", "remove", "bank"]);
+    run_pw(a, &["hd-secret", "create", "grp", "bank"]);
+    run_pw(a, &["hd-secret", "remove", "grp", "bank"]);
 
     sesh_pw(b)
-        .args(["hd-secret", "grp", "copy", "bank", "--recover", "1"])
+        .args(["hd-secret", "copy", "grp", "bank", "--recover", "1"])
         .assert()
         .failure()
         .stderr(contains("No recorded recipe"));
@@ -3962,8 +3953,8 @@ fn create_recover_restores_a_removed_entry_and_its_password() {
         home.path(),
         &[
             "hd-secret",
-            "me",
             "create",
+            "me",
             "fu",
             "bar",
             "--mode",
@@ -3975,18 +3966,18 @@ fn create_recover_restores_a_removed_entry_and_its_password() {
     let original = copy_secret(
         home.path(),
         &sink.path().join("a"),
-        &["hd-secret", "me", "copy", "fu", "bar"],
+        &["hd-secret", "copy", "me", "fu", "bar"],
     );
 
-    run_pw(home.path(), &["hd-secret", "me", "remove", "fu", "bar"]); // tombstone at 2
+    run_pw(home.path(), &["hd-secret", "remove", "me", "fu", "bar"]); // tombstone at 2
     run_pw(
         home.path(),
-        &["hd-secret", "me", "create", "fu", "bar", "--mode", "alpha"],
+        &["hd-secret", "create", "me", "fu", "bar", "--mode", "alpha"],
     ); // live at 3
 
     let out = recover_create(
         home.path(),
-        &["hd-secret", "me", "create", "fu", "bar", "--recover", "1"],
+        &["hd-secret", "create", "me", "fu", "bar", "--recover", "1"],
         "y",
     )
     .assert()
@@ -3998,13 +3989,13 @@ fn create_recover_restores_a_removed_entry_and_its_password() {
     );
 
     // The entry is live at epoch 1 again, with the original recipe...
-    let shown = run_pw(home.path(), &["hd-secret", "me", "show", "fu", "bar"]);
+    let shown = run_pw(home.path(), &["hd-secret", "show", "me", "fu", "bar"]);
     assert_eq!(field(&shown, "Epoch"), "1");
     // ...and renders the original password
     let back = copy_secret(
         home.path(),
         &sink.path().join("b"),
-        &["hd-secret", "me", "copy", "fu", "bar"],
+        &["hd-secret", "copy", "me", "fu", "bar"],
     );
     assert_eq!(back, original);
 }
@@ -4014,13 +4005,13 @@ fn create_recover_restores_a_removed_entry_and_its_password() {
 fn create_recover_asks_before_it_writes_and_declining_is_a_no_op() {
     let home = TempDir::new().unwrap();
     make_identity(home.path(), "me");
-    run_pw(home.path(), &["hd-secret", "me", "create", "bank"]);
-    run_pw(home.path(), &["hd-secret", "me", "rotate", "bank"]); // epoch 2
+    run_pw(home.path(), &["hd-secret", "create", "me", "bank"]);
+    run_pw(home.path(), &["hd-secret", "rotate", "me", "bank"]); // epoch 2
 
     let before = tree_snapshot(home.path());
     recover_create(
         home.path(),
-        &["hd-secret", "me", "create", "bank", "--recover", "1"],
+        &["hd-secret", "create", "me", "bank", "--recover", "1"],
         "n",
     )
     .assert()
@@ -4032,7 +4023,7 @@ fn create_recover_asks_before_it_writes_and_declining_is_a_no_op() {
     );
     assert_eq!(
         field(
-            &run_pw(home.path(), &["hd-secret", "me", "show", "bank"]),
+            &run_pw(home.path(), &["hd-secret", "show", "me", "bank"]),
             "Epoch"
         ),
         "2"
@@ -4045,14 +4036,14 @@ fn create_recover_asks_before_it_writes_and_declining_is_a_no_op() {
 fn create_recover_refuses_an_epoch_with_no_recorded_recipe() {
     let home = TempDir::new().unwrap();
     make_identity(home.path(), "me");
-    run_pw(home.path(), &["hd-secret", "me", "create", "bank"]); // epoch 1 only
+    run_pw(home.path(), &["hd-secret", "create", "me", "bank"]); // epoch 1 only
 
     for args in [
-        vec!["hd-secret", "me", "create", "bank", "--recover", "7"],
+        vec!["hd-secret", "create", "me", "bank", "--recover", "7"],
         vec![
             "hd-secret",
-            "me",
             "create",
+            "me",
             "bank",
             "--recover",
             "7",
@@ -4075,12 +4066,12 @@ fn create_recover_refuses_an_epoch_with_no_recorded_recipe() {
 fn create_recover_rejects_the_bricking_epochs() {
     let home = TempDir::new().unwrap();
     make_identity(home.path(), "me");
-    run_pw(home.path(), &["hd-secret", "me", "create", "bank"]);
+    run_pw(home.path(), &["hd-secret", "create", "me", "bank"]);
 
     for bad in ["0", "18446744073709551615"] {
         recover_create(
             home.path(),
-            &["hd-secret", "me", "create", "bank", "--recover", bad],
+            &["hd-secret", "create", "me", "bank", "--recover", bad],
             "y",
         )
         .assert()
@@ -4088,7 +4079,7 @@ fn create_recover_rejects_the_bricking_epochs() {
     }
     assert_eq!(
         field(
-            &run_pw(home.path(), &["hd-secret", "me", "show", "bank"]),
+            &run_pw(home.path(), &["hd-secret", "show", "me", "bank"]),
             "Epoch"
         ),
         "1"
@@ -4107,8 +4098,8 @@ fn create_recover_lets_explicit_flags_override_but_warns() {
         home.path(),
         &[
             "hd-secret",
-            "me",
             "create",
+            "me",
             "bank",
             "--mode",
             "b58",
@@ -4118,16 +4109,16 @@ fn create_recover_lets_explicit_flags_override_but_warns() {
     let inherited = copy_secret(
         home.path(),
         &sink.path().join("a"),
-        &["hd-secret", "me", "copy", "bank"],
+        &["hd-secret", "copy", "me", "bank"],
     );
-    run_pw(home.path(), &["hd-secret", "me", "rotate", "bank"]); // epoch 2
+    run_pw(home.path(), &["hd-secret", "rotate", "me", "bank"]); // epoch 2
 
     let out = recover_create(
         home.path(),
         &[
             "hd-secret",
-            "me",
             "create",
+            "me",
             "bank",
             "--recover",
             "1",
@@ -4152,11 +4143,11 @@ fn create_recover_lets_explicit_flags_override_but_warns() {
     let overridden = copy_secret(
         home.path(),
         &sink.path().join("b"),
-        &["hd-secret", "me", "copy", "bank"],
+        &["hd-secret", "copy", "me", "bank"],
     );
     assert_eq!(
         field(
-            &run_pw(home.path(), &["hd-secret", "me", "show", "bank"]),
+            &run_pw(home.path(), &["hd-secret", "show", "me", "bank"]),
             "Epoch"
         ),
         "1"
@@ -4178,7 +4169,7 @@ fn hd_fingerprint_recipe_half_tracks_params_and_secret_half_tracks_the_child() {
     };
     let show = |home: &Path| {
         field(
-            &run_pw(home, &["hd-secret", "me", "show", "bank"]),
+            &run_pw(home, &["hd-secret", "show", "me", "bank"]),
             "Fingerprint",
         )
     };
@@ -4189,8 +4180,8 @@ fn hd_fingerprint_recipe_half_tracks_params_and_secret_half_tracks_the_child() {
         home.path(),
         &[
             "hd-secret",
-            "me",
             "create",
+            "me",
             "bank",
             "--mode",
             "b58",
@@ -4204,8 +4195,8 @@ fn hd_fingerprint_recipe_half_tracks_params_and_secret_half_tracks_the_child() {
         home.path(),
         &[
             "hd-secret",
-            "me",
             "create",
+            "me",
             "bank",
             "--recover",
             "1",
@@ -4221,13 +4212,13 @@ fn hd_fingerprint_recipe_half_tracks_params_and_secret_half_tracks_the_child() {
     assert_eq!(s0, s1, "reformatting must not move the secret half");
 
     // A rotate advances the epoch, so the child changes and both halves move
-    run_pw(home.path(), &["hd-secret", "me", "rotate", "bank"]);
+    run_pw(home.path(), &["hd-secret", "rotate", "me", "bank"]);
     let (r2, s2) = halves(&show(home.path()));
     assert_ne!(r1, r2);
     assert_ne!(s1, s2, "a new epoch must move the secret half");
 
     // `list` renders the same fingerprint `show` does, dash and all
-    let listed = run_pw(home.path(), &["hd-secret", "me", "list"]);
+    let listed = run_pw(home.path(), &["hd-secret", "list", "me"]);
     assert_eq!(table_cell(&listed, "bank", 3), format!("{r2}-{s2}"));
 }
 
@@ -4241,21 +4232,21 @@ fn create_recover_inherits_the_mode_rather_than_the_clap_default() {
     // Epoch 1 is alpha - *not* the DEFAULT_MODE that `create --mode` fills in
     run_pw(
         home.path(),
-        &["hd-secret", "me", "create", "bank", "--mode", "alpha"],
+        &["hd-secret", "create", "me", "bank", "--mode", "alpha"],
     );
     run_pw(
         home.path(),
-        &["hd-secret", "me", "rotate", "bank", "--mode", "hex"],
+        &["hd-secret", "rotate", "me", "bank", "--mode", "hex"],
     ); // epoch 2
 
     recover_create(
         home.path(),
-        &["hd-secret", "me", "create", "bank", "--recover", "1"],
+        &["hd-secret", "create", "me", "bank", "--recover", "1"],
         "y",
     )
     .assert()
     .success();
-    let shown = run_pw(home.path(), &["hd-secret", "me", "show", "bank"]);
+    let shown = run_pw(home.path(), &["hd-secret", "show", "me", "bank"]);
     assert_eq!(field(&shown, "Epoch"), "1");
     assert!(
         shown.contains("--mode alpha"),
@@ -4271,23 +4262,23 @@ fn create_recover_is_itself_recoverable() {
     make_identity(home.path(), "me");
     run_pw(
         home.path(),
-        &["hd-secret", "me", "create", "bank", "--mode", "b58"],
+        &["hd-secret", "create", "me", "bank", "--mode", "b58"],
     );
     run_pw(
         home.path(),
-        &["hd-secret", "me", "rotate", "bank", "--mode", "hex"],
+        &["hd-secret", "rotate", "me", "bank", "--mode", "hex"],
     ); // epoch 2
 
     recover_create(
         home.path(),
-        &["hd-secret", "me", "create", "bank", "--recover", "1"],
+        &["hd-secret", "create", "me", "bank", "--recover", "1"],
         "y",
     )
     .assert()
     .success();
     assert_eq!(
         field(
-            &run_pw(home.path(), &["hd-secret", "me", "show", "bank"]),
+            &run_pw(home.path(), &["hd-secret", "show", "me", "bank"]),
             "Epoch"
         ),
         "1"
@@ -4296,12 +4287,12 @@ fn create_recover_is_itself_recoverable() {
     // Epoch 2's recipe survived being displaced, so we can go back to it
     recover_create(
         home.path(),
-        &["hd-secret", "me", "create", "bank", "--recover", "2"],
+        &["hd-secret", "create", "me", "bank", "--recover", "2"],
         "y",
     )
     .assert()
     .success();
-    let shown = run_pw(home.path(), &["hd-secret", "me", "show", "bank"]);
+    let shown = run_pw(home.path(), &["hd-secret", "show", "me", "bank"]);
     assert_eq!(field(&shown, "Epoch"), "2");
     assert!(shown.contains("--mode hex"), "{shown}");
 }
@@ -4315,15 +4306,15 @@ fn create_recover_emits_no_share_token_and_says_what_to_do_instead() {
     let (a, b) = (homes[0].path(), homes[1].path());
     form_group(a, b, "grp");
 
-    run_pw(a, &["hd-secret", "grp", "create", "bank", "--mode", "b58"]);
+    run_pw(a, &["hd-secret", "create", "grp", "bank", "--mode", "b58"]);
     apply_ok(b, &share_token(a, "grp", "bank"), "y\n");
     let original = hd_secret_of(a, "grp", "bank");
-    run_pw(a, &["hd-secret", "grp", "rotate", "bank"]); // both A and B move on
+    run_pw(a, &["hd-secret", "rotate", "grp", "bank"]); // both A and B move on
     apply_ok(b, &share_token(a, "grp", "bank"), "y\n");
 
     let out = recover_create(
         a,
-        &["hd-secret", "grp", "create", "bank", "--recover", "1"],
+        &["hd-secret", "create", "grp", "bank", "--recover", "1"],
         "y",
     )
     .assert()
@@ -4335,7 +4326,7 @@ fn create_recover_emits_no_share_token_and_says_what_to_do_instead() {
     );
     assert!(out.contains("cannot be synced"), "{out}");
     assert!(
-        out.contains("create bank --recover 1"),
+        out.contains("create grp bank --recover 1"),
         "names the peer's command:\n{out}"
     );
 
@@ -4343,7 +4334,7 @@ fn create_recover_emits_no_share_token_and_says_what_to_do_instead() {
     // was exchanged, because both inherited it from their own archives.
     recover_create(
         b,
-        &["hd-secret", "grp", "create", "bank", "--recover", "1"],
+        &["hd-secret", "create", "grp", "bank", "--recover", "1"],
         "y",
     )
     .assert()
@@ -4440,7 +4431,7 @@ fn hd_secret_at(home: &Path, owner: &str, id: &str, epoch: &str) -> String {
     copy_secret(
         home,
         &clip,
-        &["hd-secret", owner, "copy", id, "--recover", epoch],
+        &["hd-secret", "copy", owner, id, "--recover", epoch],
     )
 }
 
@@ -4454,11 +4445,11 @@ fn export_import_restores_a_group_and_its_registry_from_bare_metal() {
     let (ap, bp, cp) = (a.path(), b.path(), c.path());
     form_group3(ap, bp, cp, "team");
 
-    run_pw(ap, &["hd-secret", "team", "create", "github.com"]);
-    run_pw(ap, &["hd-secret", "team", "create", "aws.com", "root"]);
-    run_pw(ap, &["hd-secret", "team", "create", "old.example.com"]);
-    run_pw(ap, &["hd-secret", "team", "rotate", "github.com"]); // -> epoch 2, archives 1
-    run_pw(ap, &["hd-secret", "team", "remove", "old.example.com"]); // tombstone at epoch 2
+    run_pw(ap, &["hd-secret", "create", "team", "github.com"]);
+    run_pw(ap, &["hd-secret", "create", "team", "aws.com", "root"]);
+    run_pw(ap, &["hd-secret", "create", "team", "old.example.com"]);
+    run_pw(ap, &["hd-secret", "rotate", "team", "github.com"]); // -> epoch 2, archives 1
+    run_pw(ap, &["hd-secret", "remove", "team", "old.example.com"]); // tombstone at epoch 2
 
     let fingerprint = field(
         &run_ok(ap, &["shared-secret", "show", "team"]),
@@ -4513,11 +4504,11 @@ fn export_import_restores_a_group_and_its_registry_from_bare_metal() {
     assert_eq!(hd_secret_at(ap, "team", "old.example.com", "1"), old_e1);
     // `aws.com` needs its user; it round-tripped too
     assert_eq!(
-        table_cell(&run_pw(ap, &["hd-secret", "team", "list"]), "aws.com", 2),
+        table_cell(&run_pw(ap, &["hd-secret", "list", "team"]), "aws.com", 2),
         "1"
     );
     // The tombstone is still a tombstone: it does not list live
-    assert!(!run_pw(ap, &["hd-secret", "team", "list"]).contains("old.example.com"));
+    assert!(!run_pw(ap, &["hd-secret", "list", "team"]).contains("old.example.com"));
 }
 
 // A peer's export restores *them* too. The file is symmetric, and one export
@@ -4527,7 +4518,7 @@ fn any_member_can_open_any_members_export() {
     let (a, b, c) = wire_recoverable_trio();
     let (ap, bp, cp) = (a.path(), b.path(), c.path());
     form_group3(ap, bp, cp, "team");
-    run_pw(ap, &["hd-secret", "team", "create", "vpn"]);
+    run_pw(ap, &["hd-secret", "create", "team", "vpn"]);
 
     let file = ap.join("t.export");
     export_group(ap, "team", &file);
@@ -4699,7 +4690,7 @@ fn import_rejects_a_setup_token_swapped_in_from_another_group() {
     let (a, b) = (homes[0].path(), homes[1].path());
     form_group(a, b, "grp");
     form_group(a, b, "other");
-    run_pw(a, &["hd-secret", "grp", "create", "vpn"]);
+    run_pw(a, &["hd-secret", "create", "grp", "vpn"]);
 
     let file = a.join("grp.export");
     let other = a.join("other.export");
@@ -4733,7 +4724,7 @@ fn import_rejects_a_body_signed_by_a_non_member() {
     let homes = wire_group(&["a", "b"]);
     let (a, b) = (homes[0].path(), homes[1].path());
     form_group(a, b, "grp");
-    run_pw(a, &["hd-secret", "grp", "create", "vpn"]);
+    run_pw(a, &["hd-secret", "create", "grp", "vpn"]);
 
     let outsider = TempDir::new().unwrap();
     make_identity(outsider.path(), "dave");
@@ -4767,7 +4758,7 @@ fn a_tampered_fingerprint_row_is_a_hard_error_and_nothing_is_written() {
     let homes = wire_group(&["a", "b"]);
     let (a, b) = (homes[0].path(), homes[1].path());
     form_group(a, b, "grp");
-    run_pw(a, &["hd-secret", "grp", "create", "vpn"]);
+    run_pw(a, &["hd-secret", "create", "grp", "vpn"]);
 
     let file = a.join("grp.export");
     export_group(a, "grp", &file);
@@ -4794,7 +4785,7 @@ fn import_dry_run_writes_nothing() {
     let homes = wire_group(&["a", "b"]);
     let (a, b) = (homes[0].path(), homes[1].path());
     form_group(a, b, "grp");
-    run_pw(a, &["hd-secret", "grp", "create", "vpn"]);
+    run_pw(a, &["hd-secret", "create", "grp", "vpn"]);
     let file = a.join("grp.export");
     export_group(a, "grp", &file);
 
@@ -4818,8 +4809,8 @@ fn two_exports_converge_the_registries() {
     form_group(a, b, "grp");
 
     // Each holds a definition the other has never seen (neither shared a token)
-    run_pw(a, &["hd-secret", "grp", "create", "only-a"]);
-    run_pw(b, &["hd-secret", "grp", "create", "only-b"]);
+    run_pw(a, &["hd-secret", "create", "grp", "only-a"]);
+    run_pw(b, &["hd-secret", "create", "grp", "only-b"]);
 
     // Snapshot both files before either import, so neither carries the other's
     let file_a = a.join("a.export");
@@ -4847,9 +4838,9 @@ fn import_reports_a_stale_change_and_keeps_the_local_row() {
     let (a, b) = (homes[0].path(), homes[1].path());
     form_group(a, b, "grp");
 
-    run_pw(a, &["hd-secret", "grp", "create", "site"]);
+    run_pw(a, &["hd-secret", "create", "grp", "site"]);
     apply_ok(b, &share_token(a, "grp", "site"), "y\n"); // both at epoch 1
-    run_pw(a, &["hd-secret", "grp", "rotate", "site"]); // A moves to epoch 2
+    run_pw(a, &["hd-secret", "rotate", "grp", "site"]); // A moves to epoch 2
     let after_rotate = hd_secret_of(a, "grp", "site");
 
     let file = b.join("b.export"); // still at epoch 1
@@ -4884,8 +4875,8 @@ fn import_reports_a_conflict_skips_it_and_keeps_the_local_row() {
         a,
         &[
             "hd-secret",
-            "grp",
             "create",
+            "grp",
             "dropbox.com",
             "--length",
             "14",
@@ -4895,8 +4886,8 @@ fn import_reports_a_conflict_skips_it_and_keeps_the_local_row() {
         b,
         &[
             "hd-secret",
-            "grp",
             "create",
+            "grp",
             "dropbox.com",
             "--length",
             "20",
@@ -4912,7 +4903,7 @@ fn import_reports_a_conflict_skips_it_and_keeps_the_local_row() {
     assert!(out.contains("conflict"), "{out}");
     assert!(out.contains("params differ"), "{out}");
     assert!(
-        out.contains("hd-secret grp share dropbox.com"),
+        out.contains("hd-secret share grp dropbox.com"),
         "points at the resolver:\n{out}"
     );
     assert_eq!(
@@ -5012,11 +5003,11 @@ fn an_imported_archive_never_rewrites_local_recovery_history() {
     form_group(a, b, "grp");
 
     // Concurrent creates, deliberately different recipes
-    run_pw(a, &["hd-secret", "grp", "create", "site", "--length", "14"]);
-    run_pw(b, &["hd-secret", "grp", "create", "site", "--length", "20"]);
-    run_pw(a, &["hd-secret", "grp", "rotate", "site"]); // A: epoch 2, archives 1
-    run_pw(b, &["hd-secret", "grp", "rotate", "site"]); // B: epoch 2, archives 1
-    run_pw(b, &["hd-secret", "grp", "rotate", "site"]); // B: epoch 3, archives 2
+    run_pw(a, &["hd-secret", "create", "grp", "site", "--length", "14"]);
+    run_pw(b, &["hd-secret", "create", "grp", "site", "--length", "20"]);
+    run_pw(a, &["hd-secret", "rotate", "grp", "site"]); // A: epoch 2, archives 1
+    run_pw(b, &["hd-secret", "rotate", "grp", "site"]); // B: epoch 2, archives 1
+    run_pw(b, &["hd-secret", "rotate", "grp", "site"]); // B: epoch 3, archives 2
 
     // A's own passwords at every epoch it has ever held
     let a_e1 = hd_secret_at(a, "grp", "site", "1");

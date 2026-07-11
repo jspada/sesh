@@ -13,6 +13,7 @@
 
 use blstrs::Scalar;
 use clap::{Arg, ArgAction, ArgMatches, Command};
+use clap_complete::{ArgValueCandidates, CompleteEnv, CompletionCandidate};
 use zeroize::Zeroizing;
 
 use crate::clipboard;
@@ -60,6 +61,41 @@ fn mode_defaults(mode: &str) -> (Option<u64>, Option<&'static str>) {
     }
 }
 
+/// Names for shell completion. Runs on every tab press, so it must never
+/// prompt and never fail loudly: any resolution or listing error completes to
+/// nothing. Only plaintext-on-disk names are offered; hd-secret ids live in an
+/// encrypted registry and are deliberately not completable.
+fn completion_names(
+    list: fn(&Keystore) -> crate::keystore::Result<Vec<String>>,
+) -> Vec<CompletionCandidate> {
+    let Ok(loc) = config::resolve(None) else {
+        return Vec::new();
+    };
+    list(&Keystore::open(loc.path))
+        .map(|names| names.into_iter().map(CompletionCandidate::new).collect())
+        .unwrap_or_default()
+}
+
+fn keypair_completer() -> ArgValueCandidates {
+    ArgValueCandidates::new(|| completion_names(Keystore::list_identities))
+}
+
+fn contact_completer() -> ArgValueCandidates {
+    ArgValueCandidates::new(|| completion_names(Keystore::list_contacts))
+}
+
+fn group_completer() -> ArgValueCandidates {
+    ArgValueCandidates::new(|| completion_names(Keystore::list_shared_secrets))
+}
+
+fn owner_completer() -> ArgValueCandidates {
+    ArgValueCandidates::new(|| {
+        let mut names = completion_names(Keystore::list_identities);
+        names.extend(completion_names(Keystore::list_shared_secrets));
+        names
+    })
+}
+
 /// Build the top-level clap command tree
 pub fn build_cli() -> Command {
     // `--mode` appears exactly on commands that output a secret. Without a
@@ -73,7 +109,7 @@ pub fn build_cli() -> Command {
             .help("Output encoding")
     };
     let name_arg = |help: &'static str| Arg::new("name").required(true).help(help);
-    let group_arg = || name_arg("Shared-secret group name");
+    let group_arg = || name_arg("Shared-secret group name").add(group_completer());
 
     Command::new("sesh")
         .version("0.1.0")
@@ -127,20 +163,20 @@ pub fn build_cli() -> Command {
                     Command::new("show")
                         .about("Show an identity: fingerprint, contact token, private-key status")
                         .arg_required_else_help(true)
-                        .arg(name_arg("Identity name")),
+                        .arg(name_arg("Identity name").add(keypair_completer())),
                 )
                 .subcommand(Command::new("list").about("List identities"))
                 .subcommand(
                     Command::new("remove")
                         .about("Remove an identity (cascades the shared-secrets it owns)")
                         .arg_required_else_help(true)
-                        .arg(name_arg("Identity name")),
+                        .arg(name_arg("Identity name").add(keypair_completer())),
                 )
                 .subcommand(
                     Command::new("password")
                         .about("Change the password of an identity")
                         .arg_required_else_help(true)
-                        .arg(name_arg("Identity name")),
+                        .arg(name_arg("Identity name").add(keypair_completer())),
                 ),
         )
         // contact subcommand
@@ -161,14 +197,14 @@ pub fn build_cli() -> Command {
                     Command::new("show")
                         .about("Show a contact: fingerprint and pinned token")
                         .arg_required_else_help(true)
-                        .arg(name_arg("Contact alias")),
+                        .arg(name_arg("Contact alias").add(contact_completer())),
                 )
                 .subcommand(Command::new("list").about("List contacts"))
                 .subcommand(
                     Command::new("remove")
                         .about("Remove a contact (cascades the shared-secrets it belongs to)")
                         .arg_required_else_help(true)
-                        .arg(name_arg("Contact alias")),
+                        .arg(name_arg("Contact alias").add(contact_completer())),
                 ),
         )
         // shared-secret subcommand
@@ -184,9 +220,11 @@ pub fn build_cli() -> Command {
                         .arg(Arg::new("name").required(true)
                             .help("Agreed group name (also the storage key)"))
                         .arg(Arg::new("keypair").long("keypair").required(true)
+                            .add(keypair_completer())
                             .help("Local identity providing the seed"))
                         .arg(Arg::new("party").long("party")
                             .action(ArgAction::Append).required(true)
+                            .add(contact_completer())
                             .help("A pinned contact alias (repeat for a 3rd party)"))
                         .arg(Arg::new("token").long("token")
                             .action(ArgAction::Append)
@@ -200,6 +238,7 @@ pub fn build_cli() -> Command {
                     Command::new("list")
                         .about("List shared-secret groups")
                         .arg(Arg::new("keypair")
+                            .add(keypair_completer())
                             .help("Only list groups owned by this keypair")),
                 )
                 .subcommand(
@@ -275,9 +314,11 @@ pub fn build_cli() -> Command {
                         .arg(Arg::new("file").required(true)
                             .help("Path to the export file (the group name is inside it)"))
                         .arg(Arg::new("keypair").long("keypair").required(true)
+                            .add(keypair_completer())
                             .help("Local identity providing the seed"))
                         .arg(Arg::new("party").long("party")
                             .action(ArgAction::Append).required(true)
+                            .add(contact_completer())
                             .help("A pinned contact alias (repeat for a 3rd party)"))
                         .arg(Arg::new("dry-run").long("dry-run").action(ArgAction::SetTrue)
                             .help("Verify and show the diff without writing anything")),
@@ -285,6 +326,9 @@ pub fn build_cli() -> Command {
         })
         // hd-secret subcommand
         .subcommand({
+            let owner_arg = || Arg::new("owner").required(true)
+                .add(owner_completer())
+                .help("Owning keypair or shared-secret group");
             let id_arg = || Arg::new("id").required(true)
                 .help("Child label, e.g. google.com");
             let user_arg = || Arg::new("user")
@@ -313,20 +357,15 @@ pub fn build_cli() -> Command {
             let recover_arg = || Arg::new("recover").long("recover")
                 .value_name("EPOCH")
                 .help("Re-derive using the recipe that was current at this epoch");
-            // The owner positional is deliberately NOT `.required(true)`: clap
-            // validates parent required args even when a subcommand is present,
-            // which would break the owner-less `hd-secret apply`. Each token is
-            // checked against subcommand names first, otherwise it fills the
-            // positional, entity names can never equal a subcommand word
-            // (reserved-name rule, enforced at creation).
             Command::new("hd-secret")
                 .about("Manage and derive HD child secrets (password-manager layer)")
+                .subcommand_required(true)
                 .arg_required_else_help(true)
-                .arg(Arg::new("owner")
-                    .help("Owning keypair or shared-secret group"))
                 .subcommand(
                     Command::new("list")
                         .about("List stored definitions (never secrets)")
+                        .arg_required_else_help(true)
+                        .arg(owner_arg())
                         // `--removed` is the obvious name and stays as an alias,
                         // but the archive also holds recipes superseded by
                         // `rotate`, which were never removed. `--archived` is
@@ -343,7 +382,7 @@ pub fn build_cli() -> Command {
                             "Register a new hd-secret definition.\n\n\
                              Defaults, when the flags are not given: `--mode b58 --length 14 \
                              --symbols`. They are resolved once and stored in the definition's \
-                             params, where `hd-secret <owner> list` and `show` print them back.\n\n\
+                             params, where `hd-secret list` and `show` print them back.\n\n\
                              The --length and --symbols defaults apply only to the modes that \
                              take a symbol set, and per mode: hex and b58 get `--length 14 \
                              --symbols`; b10 is a numeric code, so it gets `--length 6 \
@@ -365,7 +404,7 @@ pub fn build_cli() -> Command {
                              instead: it writes nothing and needs no coordination.",
                         )
                         .arg_required_else_help(true)
-                        .arg(id_arg()).arg(user_arg())
+                        .arg(owner_arg()).arg(id_arg()).arg(user_arg())
                         .arg(length_arg()).arg(symbols_arg()).arg(no_symbols_arg()).arg(suffix_arg())
                         .arg(mode_arg().default_value(DEFAULT_MODE))
                         .arg(Arg::new("recover").long("recover")
@@ -376,7 +415,7 @@ pub fn build_cli() -> Command {
                     Command::new("show")
                         .about("Show one stored entry: params + secret fingerprint (never the secret)")
                         .arg_required_else_help(true)
-                        .arg(id_arg()).arg(user_arg()).arg(recover_arg()),
+                        .arg(owner_arg()).arg(id_arg()).arg(user_arg()).arg(recover_arg()),
                 )
                 .subcommand(
                     Command::new("copy")
@@ -394,7 +433,7 @@ pub fn build_cli() -> Command {
                              to compare against.",
                         )
                         .arg_required_else_help(true)
-                        .arg(id_arg()).arg(user_arg()).arg(mode_arg()).arg(recover_arg())
+                        .arg(owner_arg()).arg(id_arg()).arg(user_arg()).arg(mode_arg()).arg(recover_arg())
                         .arg(Arg::new("timeout").short('t').long("timeout")
                             .default_value("30")
                             .help("Seconds before the clipboard is zeroed (any key zeros early)")),
@@ -403,7 +442,7 @@ pub fn build_cli() -> Command {
                     Command::new("rotate")
                         .about("Bump a definition's epoch (optionally new params) and show it")
                         .arg_required_else_help(true)
-                        .arg(id_arg()).arg(user_arg())
+                        .arg(owner_arg()).arg(id_arg()).arg(user_arg())
                         .arg(epoch_arg().help("Explicit new epoch (must exceed the current one)"))
                         .arg(length_arg()).arg(symbols_arg()).arg(no_symbols_arg()).arg(suffix_arg()).arg(mode_arg())
                         .arg(Arg::new("dry-run").long("dry-run").action(ArgAction::SetTrue)
@@ -413,13 +452,13 @@ pub fn build_cli() -> Command {
                     Command::new("remove")
                         .about("Tombstone a definition")
                         .arg_required_else_help(true)
-                        .arg(id_arg()).arg(user_arg()),
+                        .arg(owner_arg()).arg(id_arg()).arg(user_arg()),
                 )
                 .subcommand(
                     Command::new("reveal")
                         .about("Show a stored secret on screen in a supervised, timed window (TTY only)")
                         .arg_required_else_help(true)
-                        .arg(id_arg()).arg(user_arg()).arg(mode_arg()).arg(recover_arg())
+                        .arg(owner_arg()).arg(id_arg()).arg(user_arg()).arg(mode_arg()).arg(recover_arg())
                         .arg(Arg::new("timeout").short('t').long("timeout")
                             .default_value("60")
                             .help("Seconds the secret stays on screen (any key clears early)")),
@@ -428,7 +467,7 @@ pub fn build_cli() -> Command {
                     Command::new("share")
                         .about("Print a stored entry's share token for the other group members")
                         .arg_required_else_help(true)
-                        .arg(id_arg()).arg(user_arg()),
+                        .arg(owner_arg()).arg(id_arg()).arg(user_arg()),
                 )
                 .subcommand(
                     Command::new("apply")
@@ -483,6 +522,9 @@ pub fn build_cli() -> Command {
 
 /// Parse arguments and run, returning a process exit code
 pub fn run() -> i32 {
+    // Dynamic shell completion: `COMPLETE=<shell> sesh` prints the registration
+    // script, and completion requests are answered here and exit before parsing.
+    CompleteEnv::with_factory(build_cli).complete();
     let matches = build_cli().get_matches();
     // A `--keystore` anywhere on the line pins the keystore location for this
     // process, ahead of $SESH_HOME and the default.
@@ -1375,7 +1417,7 @@ fn load_group_arg(ks: &Keystore, name: &str, verb: &str) -> Result<SharedSecretS
     if ks.identity_exists(name) && !ks.shared_secret_exists(name) {
         return Err(format!(
             "'{name}' is a keypair; `shared-secret {verb}` takes a group name \
-             (for per-site secrets use `hd-secret {name} ...`)"
+             (for per-site secrets use `hd-secret <command> {name} ...`)"
         ));
     }
     ks.load_shared_secret(name).map_err(se)
@@ -1404,7 +1446,7 @@ fn cmd_ss_show(m: &ArgMatches) -> Result<(), String> {
     let state = load_group_arg(&ks, name, "show")?;
     // Deliberately metadata-only: K is the group master keying every group
     // `hd-secret` and never leaves the keystore. Its leaf secrets are reached
-    // only through `hd-secret <group> copy` / `reveal`.
+    // only through `hd-secret copy <group>` / `reveal`.
     let mut kv = group_details(&ks, name, &state);
     kv.push((
         "Secret",
@@ -2018,7 +2060,7 @@ fn cmd_ss_import_with<T: wizard::Terminal>(term: &mut T, m: &ArgMatches) -> Resu
         // conflict branch is the existing UI for exactly one such decision.
         println!(
             "Conflicts are not resolved here. Ask '{signed_by}' to run\n    \
-             sesh hd-secret {group_name} share {}\n\
+             sesh hd-secret share {group_name} {}\n\
              and apply the token with `sesh hd-secret apply <token>`: it shows both recipes\n\
              side by side and lets you pick.",
             conflicts[0]
@@ -2099,42 +2141,21 @@ fn cmd_ss_import_with<T: wizard::Terminal>(term: &mut T, m: &ArgMatches) -> Resu
 // -----------------
 
 fn cmd_hd_secret(m: &ArgMatches) -> Result<(), String> {
-    let owner = m.get_one::<String>("owner").map(String::as_str);
-    // `apply` first: the token itself identifies the group, so an owner is a
-    // usage error, not something to silently ignore.
-    if let Some(("apply", sm)) = m.subcommand() {
-        if let Some(o) = owner {
-            return Err(format!(
-                "`hd-secret apply` takes no owner (got '{o}') - the token itself \
-                 identifies the group"
-            ));
-        }
-        return cmd_hd_apply(sm);
+    // Every subcommand except `apply` carries a required `owner` positional;
+    // `apply` has none, because the token itself identifies the group.
+    fn owner(sm: &ArgMatches) -> &str {
+        sm.get_one::<String>("owner").expect("required").as_str()
     }
-    let owner = owner.ok_or_else(|| {
-        "Missing owner - usage: sesh hd-secret <keypair-or-group> <command> ...".to_string()
-    })?;
     match m.subcommand() {
-        // A bare owner is not a command: show the subcommand help, matching
-        // clap's own missing-subcommand behavior (help to stdout, exit 2).
-        None => {
-            let mut cli = build_cli();
-            let mut family = cli
-                .find_subcommand_mut("hd-secret")
-                .expect("hd-secret subcommand exists")
-                .clone()
-                .bin_name("sesh hd-secret");
-            family.print_help().map_err(se)?;
-            std::process::exit(2);
-        }
-        Some(("list", sm)) => cmd_hd_list(owner, sm),
-        Some(("create", sm)) => cmd_hd_create(owner, sm),
-        Some(("show", sm)) => cmd_hd_show(owner, sm),
-        Some(("copy", sm)) => cmd_hd_copy(owner, sm),
-        Some(("rotate", sm)) => cmd_hd_rotate(owner, sm),
-        Some(("remove", sm)) => cmd_hd_remove(owner, sm),
-        Some(("reveal", sm)) => cmd_hd_reveal(owner, sm),
-        Some(("share", sm)) => cmd_hd_share(owner, sm),
+        Some(("apply", sm)) => cmd_hd_apply(sm),
+        Some(("list", sm)) => cmd_hd_list(owner(sm), sm),
+        Some(("create", sm)) => cmd_hd_create(owner(sm), sm),
+        Some(("show", sm)) => cmd_hd_show(owner(sm), sm),
+        Some(("copy", sm)) => cmd_hd_copy(owner(sm), sm),
+        Some(("rotate", sm)) => cmd_hd_rotate(owner(sm), sm),
+        Some(("remove", sm)) => cmd_hd_remove(owner(sm), sm),
+        Some(("reveal", sm)) => cmd_hd_reveal(owner(sm), sm),
+        Some(("share", sm)) => cmd_hd_share(owner(sm), sm),
         _ => Err("unknown hd-secret subcommand".into()),
     }
 }
@@ -2407,7 +2428,7 @@ fn cmd_hd_list(owner: &str, m: &ArgMatches) -> Result<(), String> {
         print!("{}", table.render());
         if archived {
             println!();
-            println!("Recover one with: hd-secret {owner} copy <id> [user] --recover <epoch>");
+            println!("Recover one with: hd-secret copy {owner} <id> [user] --recover <epoch>");
         }
     }
     Ok(())
@@ -2526,7 +2547,7 @@ fn cmd_hd_create(owner: &str, m: &ArgMatches) -> Result<(), String> {
             println!();
             println!(
                 "No share token: a recovery cannot be synced. Every other member must run\n    \
-                 sesh hd-secret {owner} create {sel} --recover {}\n\
+                 sesh hd-secret create {owner} {sel} --recover {}\n\
                  for the group to agree. The recipe above is inherited, so it need not be retyped.",
                 def.epoch
             );
@@ -3518,9 +3539,9 @@ mod tests {
         }
     }
 
-    // Parse an `hd-secret <owner> <sub> x` line, returning the subcommand's matches
+    // Parse an `hd-secret <sub> <owner> x` line, returning the subcommand's matches
     fn sub_matches(sub: &str, extra: &[&str]) -> Result<ArgMatches, clap::Error> {
-        let mut argv = vec!["sesh", "hd-secret", "me", sub, "x"];
+        let mut argv = vec!["sesh", "hd-secret", sub, "me", "x"];
         argv.extend_from_slice(extra);
         let m = build_cli().try_get_matches_from(argv)?;
         let (_, hd) = m.subcommand().expect("hd-secret");
@@ -3528,14 +3549,14 @@ mod tests {
         Ok(sm.clone())
     }
 
-    // An `hd-secret <owner> create` line. `--mode` carries a `default_value`
+    // An `hd-secret create <owner>` line. `--mode` carries a `default_value`
     // here and **not** on `rotate` which is exactly why `rotate` cannot
     // re-apply `create`'s defaults over a stored recipe.
     fn create_matches(extra: &[&str]) -> Result<ArgMatches, clap::Error> {
         sub_matches("create", extra)
     }
 
-    // An `hd-secret <owner> rotate` line.
+    // An `hd-secret rotate <owner>` line.
     fn rotate_matches(extra: &[&str]) -> Result<ArgMatches, clap::Error> {
         sub_matches("rotate", extra)
     }

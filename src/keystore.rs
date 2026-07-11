@@ -414,8 +414,8 @@ impl Keystore {
         if path.exists() {
             return Err(KeystoreError::AlreadyExists(name.to_string()));
         }
-        // Keypair and group names share one namespace so `hd-secret <owner>`
-        // can resolve a bare name unambiguously.
+        // Keypair and group names share one namespace so an hd-secret owner
+        // positional can resolve a bare name unambiguously.
         if self.shared_secret_exists(name) {
             return Err(KeystoreError::AlreadyExists(format!(
                 "{name} (a shared-secret group has this name; keypair and group names must differ)"
@@ -767,8 +767,8 @@ impl Keystore {
     pub fn store_shared_secret(&self, name: &str, state: &SharedSecretState) -> Result<()> {
         validate_new_name(name)?;
         self.ensure_initialized()?;
-        // Keypair and group names share one namespace so `hd-secret <owner>`
-        // can resolve a bare name unambiguously.
+        // Keypair and group names share one namespace so an hd-secret owner
+        // positional can resolve a bare name unambiguously.
         if self.identity_exists(name) {
             return Err(KeystoreError::AlreadyExists(format!(
                 "{name} (a keypair has this name; keypair and group names must differ)"
@@ -1298,8 +1298,10 @@ pub fn validate_name(name: &str) -> Result<()> {
     }
 }
 
-/// CLI subcommand words an entity may never be named, so a name in the
-/// `hd-secret <owner>` position can never be mistaken for a subcommand.
+/// CLI subcommand words an entity may never be named. The grammar no longer
+/// puts an owner where a subcommand could go, but a keypair or group named
+/// `create` or `remove` would still make every command line that mentions it
+/// misread, so the rule stays.
 pub const RESERVED_NAMES: [&str; 12] = [
     "create", "show", "copy", "list", "rotate", "remove", "reveal", "share", "apply", "new", "add",
     "help",

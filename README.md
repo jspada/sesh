@@ -144,6 +144,43 @@ is missing (e.g. device not mounted) sesh reports it and stops, rather than sile
 writing secrets to the internal disk at that mount point. Provision such a store
 once with `sesh --keystore <path> keypair create <name>` (with the device
 mounted), then point `config.toml` at it.
+
+### Tab completion
+
+Sesh ships with dynamic shell completion: the completions are computed live by the
+binary itself (`COMPLETE=<shell> sesh` prints the registration script), so
+subcommands, flags, and entity names all complete, with nothing to regenerate
+after an upgrade. `sesh` must be on your `PATH`.
+
+To try it in the current shell:
+
+```console
+$ source <(COMPLETE=zsh sesh)     # zsh
+$ source <(COMPLETE=bash sesh)    # bash
+$ COMPLETE=fish sesh | source     # fish
+```
+
+To always have it enabled, add the same line to your shell's startup file:
+
+```console
+$ echo 'source <(COMPLETE=zsh sesh)'  >> ~/.zshrc                    # zsh
+$ echo 'source <(COMPLETE=bash sesh)' >> ~/.bashrc                   # bash
+$ echo 'COMPLETE=fish sesh | source'  >> ~/.config/fish/config.fish  # fish
+```
+
+Zsh only: the registration script calls `compdef`, which exists only after
+zsh's completion system is initialized. If you see `command not found:
+compdef`, add `autoload -Uz compinit && compinit` to `~/.zshrc` **before** the
+`source` line (frameworks like oh-my-zsh already do this). Bash and fish need
+nothing extra: `complete` is a bash builtin, and fish's completion system is
+always on.
+
+Completion only ever offers names that are already plaintext on disk (keypair,
+contact, and group names). hd-secret ids live inside an encrypted registry and
+are deliberately **not** completable: completion runs on every tab press and
+must never prompt for a password, and the ids' confidentiality should not
+depend on a shell convenience.
+
 ## Usage
 
 Entity names are positionals throughout, and running any family bare
@@ -151,9 +188,9 @@ Entity names are positionals throughout, and running any family bare
 details and **never** a secret. Only managed **hd-secret leaf** secrets ever
 leave sesh, and only through two supervised commands:
 
-- `hd-secret ... copy` - the secret goes to the system clipboard, never echoed,
+- `hd-secret copy ...` - the secret goes to the system clipboard, never echoed,
   then a countdown zeros it;
-- `hd-secret ... reveal` - the secret is shown on screen in a timed, supervised
+- `hd-secret reveal ...` - the secret is shown on screen in a timed, supervised
   window (TTY only; see *Names, clipboard, cascades*).
 
 A stored group's master `K` and every identity seed have **no** output command
@@ -240,7 +277,7 @@ state is stored and never `K`, which stays in the keystore as the group's HD
 master and is re-derived on demand.
 
 N.B. `show` is metadata-only in both families. `shared-secret show` prints the
-group's public details; `hd-secret ... show` prints the entry's params plus the
+group's public details; `hd-secret show ...` prints the entry's params plus the
 derived secret's fingerprint.
 
 ### 4. Derive HD child secrets
@@ -253,16 +290,16 @@ an `epoch` version, and formatting params), encrypted at rest under the owning
 keypair, and every secret is re-derived on demand.
 
 ```console
-$ sesh hd-secret alice create google.com bob@google.com
-$ sesh hd-secret alice list                       # Shows table of public info, never secrets
-$ sesh hd-secret alice show google.com            # Show's entry details + fingerprint (only public info)
-$ sesh hd-secret alice copy google.com            # Copy a secret -> clipboard, never echoed
+$ sesh hd-secret create alice google.com bob@google.com
+$ sesh hd-secret list alice                       # Shows table of public info, never secrets
+$ sesh hd-secret show alice google.com            # Show's entry details + fingerprint (only public info)
+$ sesh hd-secret copy alice google.com            # Copy a secret -> clipboard, never echoed
                                                   #   then a live countdown zeros it.
-$ sesh hd-secret alice reveal google.com          # Show a secret on screen, timed window (TTY only)
+$ sesh hd-secret reveal alice google.com          # Show a secret on screen, timed window (TTY only)
                                                   #   then a live countdown zeros it.
-$ sesh hd-secret alice copy google.com --mode hex # Display-only re-encoding
-$ sesh hd-secret alice rotate google.com          # Secret rotation: bump epoch -> new secret
-$ sesh hd-secret alice remove google.com          # Remove a secret (epoch-versioned tombstone)
+$ sesh hd-secret copy alice google.com --mode hex # Display-only re-encoding
+$ sesh hd-secret rotate alice google.com          # Secret rotation: bump epoch -> new secret
+$ sesh hd-secret remove alice google.com          # Remove a secret (epoch-versioned tombstone)
 ```
 
 The `--mode` (`hex`/`b58`/`b10`/`alpha`/`bip39`), `--length`, `--symbols`, and
@@ -333,7 +370,7 @@ group-bound **share tokens** with no secret material, just the recipe.
 ```console
 $ sesh hd-secret apply <share-token>   # Apply an password safe update, where
                                        #   the token identifies the group automatically
-$ sesh hd-secret OurGroup share vpn    # Re-share a stored entry (no secret transmitted)
+$ sesh hd-secret share OurGroup vpn    # Re-share a stored entry (no secret transmitted)
 ```
 
 N.B. putting the contact token on the command-line is optional, the better way is
@@ -450,12 +487,12 @@ computed on the fly at display time; no registry or share token stores one.
 
 ## Names, clipboard, cascades
 
-- **One namespace.** Keypair and group names must be distinct (so a bare
-  `hd-secret <owner>` resolves unambiguously), no entity may be named after a
+- **One namespace.** Keypair and group names must be distinct (so an
+  hd-secret owner name resolves unambiguously), no entity may be named after a
   command word (`create`, `show`, `copy`, `list`, `rotate`, `remove`,
   `reveal`, `share`, `apply`, `new`, `add`, `help`) or start with `-`; all
   enforced at creation.
-- **Clipboard.** `hd-secret ... copy` pipes the secret to the tool's stdin
+- **Clipboard.** `hd-secret copy ...` pipes the secret to the tool's stdin
   (never argv): `SESH_CLIPBOARD_CMD` if set (run via `sh -c`), else `pbcopy`
   (macOS), else `wl-copy` (Wayland) / `xclip -selection clipboard` (X11). On an
   interactive terminal, `copy` then shows a **zeroing countdown**: an animated
@@ -463,7 +500,7 @@ computed on the fly at display time; no registry or share token stores one.
   switch apps and paste, then overwrites (zeros) the clipboard. **Any key**
   zeros immediately; both exit cleanly. Piped (non-interactive) `copy` skips the
   countdown.
-- **On-screen reveal.** `hd-secret ... reveal` shows the secret on the
+- **On-screen reveal.** `hd-secret reveal ...` shows the secret on the
   **alternate screen buffer** (no scrollback, vanishes on exit) with a
   countdown below it (`--timeout`, default 60s; **any key** clears immediately),
   wiping the region before it returns. The countdown runs with terminal signals
