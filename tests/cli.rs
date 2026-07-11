@@ -445,7 +445,7 @@ fn bare_families_print_help() {
             String::from_utf8_lossy(&out.stderr)
         );
         assert!(
-            all.contains("USAGE"),
+            all.contains("Usage"),
             "no help for bare `sesh {family}`:\n{all}"
         );
     }
@@ -2176,7 +2176,7 @@ fn hd_bare_owner_shows_help() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(all.contains("USAGE"), "expected help output:\n{all}");
+    assert!(all.contains("Usage"), "expected help output:\n{all}");
     assert!(
         all.contains("list"),
         "help should mention the list subcommand:\n{all}"

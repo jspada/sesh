@@ -12,7 +12,7 @@
 //! viewing window, zeroed). No other command outputs raw secret material.
 
 use blstrs::Scalar;
-use clap::{Arg, ArgMatches, Command};
+use clap::{Arg, ArgAction, ArgMatches, Command};
 use zeroize::Zeroizing;
 
 use crate::clipboard;
@@ -61,7 +61,7 @@ fn mode_defaults(mode: &str) -> (Option<u64>, Option<&'static str>) {
 }
 
 /// Build the top-level clap command tree
-pub fn build_cli() -> Command<'static> {
+pub fn build_cli() -> Command {
     // `--mode` appears exactly on commands that output a secret. Without a
     // default it is a display-only override of stored params (hd copy/reveal,
     // rotate merge); with the default it is the stored param (create).
@@ -69,12 +69,10 @@ pub fn build_cli() -> Command<'static> {
         Arg::new("mode")
             .short('m')
             .long("mode")
-            .takes_value(true)
-            .possible_values(format::MODES)
+            .value_parser(format::MODES)
             .help("Output encoding")
     };
-    let name_arg =
-        |help: &'static str| Arg::new("name").takes_value(true).required(true).help(help);
+    let name_arg = |help: &'static str| Arg::new("name").required(true).help(help);
     let group_arg = || name_arg("Shared-secret group name");
 
     Command::new("sesh")
@@ -89,7 +87,7 @@ pub fn build_cli() -> Command<'static> {
         .arg(
             Arg::new("keystore")
                 .long("keystore")
-                .takes_value(true)
+
                 .global(true)
                 .help("Keystore directory (overrides $SESH_HOME and ~/.sesh)"),
         )
@@ -121,7 +119,7 @@ pub fn build_cli() -> Command<'static> {
                         )
                         .arg_required_else_help(true)
                         .arg(name_arg("Identity name"))
-                        .arg(Arg::new("mnemonic").long("mnemonic")
+                        .arg(Arg::new("mnemonic").long("mnemonic").action(ArgAction::SetTrue)
                             .help("Prompt for a 24-word BIP39 mnemonic and use it as the seed \
                                    (import-only; takes no value, never put a phrase on the command line)")),
                 )
@@ -149,9 +147,9 @@ pub fn build_cli() -> Command<'static> {
                     Command::new("add")
                         .about("Pin a peer's contact token under its embedded name (or --name)")
                         .arg_required_else_help(true)
-                        .arg(Arg::new("token").takes_value(true).required(true)
+                        .arg(Arg::new("token").required(true)
                             .help("The peer's base58check contact token"))
-                        .arg(Arg::new("name").short('n').long("name").takes_value(true)
+                        .arg(Arg::new("name").short('n').long("name")
                             .help("Pin under this local alias instead of the token's name")),
                 )
                 .subcommand(
@@ -178,25 +176,25 @@ pub fn build_cli() -> Command<'static> {
                     Command::new("create")
                         .about("Form a shared secret with pinned contacts and store it")
                         .arg_required_else_help(true)
-                        .arg(Arg::new("name").takes_value(true).required(true)
+                        .arg(Arg::new("name").required(true)
                             .help("Agreed group name (also the storage key)"))
-                        .arg(Arg::new("keypair").long("keypair").takes_value(true).required(true)
+                        .arg(Arg::new("keypair").long("keypair").required(true)
                             .help("Local identity providing the seed"))
-                        .arg(Arg::new("party").long("party").takes_value(true)
-                            .multiple_occurrences(true).required(true)
+                        .arg(Arg::new("party").long("party")
+                            .action(ArgAction::Append).required(true)
                             .help("A pinned contact alias (repeat for a 3rd party)"))
-                        .arg(Arg::new("token").long("token").takes_value(true)
-                            .multiple_occurrences(true)
+                        .arg(Arg::new("token").long("token")
+                            .action(ArgAction::Append)
                             .help("Peer setup token(s), one per --party in matching order (non-interactive)"))
-                        .arg(Arg::new("emit-token").long("emit-token")
+                        .arg(Arg::new("emit-token").long("emit-token").action(ArgAction::SetTrue)
                             .help("Print your own setup token and exit (phase 1)"))
-                        .arg(Arg::new("wizard").long("wizard")
+                        .arg(Arg::new("wizard").long("wizard").action(ArgAction::SetTrue)
                             .help("Force the interactive wizard even when stdin is piped")),
                 )
                 .subcommand(
                     Command::new("list")
                         .about("List shared-secret groups")
-                        .arg(Arg::new("keypair").takes_value(true)
+                        .arg(Arg::new("keypair")
                             .help("Only list groups owned by this keypair")),
                 )
                 .subcommand(
@@ -241,7 +239,7 @@ pub fn build_cli() -> Command<'static> {
                         )
                         .arg_required_else_help(true)
                         .arg(group_arg())
-                        .arg(Arg::new("file").takes_value(true).required(true)
+                        .arg(Arg::new("file").required(true)
                             .help("Output path for the encrypted export")),
                 )
                 // import subcommand
@@ -269,45 +267,45 @@ pub fn build_cli() -> Command<'static> {
                              replaces, and importing two members' exports converges them.",
                         )
                         .arg_required_else_help(true)
-                        .arg(Arg::new("file").takes_value(true).required(true)
+                        .arg(Arg::new("file").required(true)
                             .help("Path to the export file (the group name is inside it)"))
-                        .arg(Arg::new("keypair").long("keypair").takes_value(true).required(true)
+                        .arg(Arg::new("keypair").long("keypair").required(true)
                             .help("Local identity providing the seed"))
-                        .arg(Arg::new("party").long("party").takes_value(true)
-                            .multiple_occurrences(true).required(true)
+                        .arg(Arg::new("party").long("party")
+                            .action(ArgAction::Append).required(true)
                             .help("A pinned contact alias (repeat for a 3rd party)"))
-                        .arg(Arg::new("dry-run").long("dry-run")
+                        .arg(Arg::new("dry-run").long("dry-run").action(ArgAction::SetTrue)
                             .help("Verify and show the diff without writing anything")),
                 )
         })
         // hd-secret subcommand
         .subcommand({
-            let id_arg = || Arg::new("id").takes_value(true).required(true)
+            let id_arg = || Arg::new("id").required(true)
                 .help("Child label, e.g. google.com");
-            let user_arg = || Arg::new("user").takes_value(true)
+            let user_arg = || Arg::new("user")
                 .help("Optional sub-account, e.g. bob@google.com");
-            let length_arg = || Arg::new("length").short('l').long("length").takes_value(true)
+            let length_arg = || Arg::new("length").short('l').long("length")
                 .help("Trim the secret to this length");
-            let suffix_arg = || Arg::new("suffix").short('u').long("suffix").takes_value(true)
+            let suffix_arg = || Arg::new("suffix").short('u').long("suffix")
                 .help("Append this fixed suffix (max 8)");
             // `--symbols` alone resolves to the built-in default set;
             // `--symbols='!@#'` names one explicitly. `require_equals` keeps
             // `--symbols --length 20` from swallowing the next flag as the set,
-            // and `max_values(1)` caps the multi-value behaviour `min_values(0)` implies.
+            // and `num_args(0..=1)` caps how many values the flag may take.
             let symbols_arg = || Arg::new("symbols").long("symbols")
-                .takes_value(true).min_values(0).max_values(1)
+                .num_args(0..=1)
                 .require_equals(true)
                 .default_missing_value(format::SYMBOLS)
                 .conflicts_with("no-symbols")
                 .help("Extend the password alphabet with these characters (hex/b10/b58 only)");
-            let no_symbols_arg = || Arg::new("no-symbols").long("no-symbols").takes_value(false)
+            let no_symbols_arg = || Arg::new("no-symbols").long("no-symbols").action(ArgAction::SetTrue)
                 .help("Turn off symbol mixing (e.g. on rotate)");
-            let epoch_arg = || Arg::new("epoch").short('e').long("epoch").takes_value(true);
+            let epoch_arg = || Arg::new("epoch").short('e').long("epoch");
             // Disaster recovery, read-only. One flag, not an `--epoch` /
             // `--force` pair: on a command that derives and prints there is no
             // safety rule to override, so there is no invalid combination to
             // guard against. The epoch *is* the whole request.
-            let recover_arg = || Arg::new("recover").long("recover").takes_value(true)
+            let recover_arg = || Arg::new("recover").long("recover")
                 .value_name("EPOCH")
                 .help("Re-derive using the recipe that was current at this epoch");
             // The owner positional is deliberately NOT `.required(true)`: clap
@@ -319,7 +317,7 @@ pub fn build_cli() -> Command<'static> {
             Command::new("hd-secret")
                 .about("Manage and derive HD child secrets (a password-manager layer)")
                 .arg_required_else_help(true)
-                .arg(Arg::new("owner").takes_value(true)
+                .arg(Arg::new("owner")
                     .help("Owning keypair or shared-secret group"))
                 .subcommand(
                     Command::new("list")
@@ -328,7 +326,7 @@ pub fn build_cli() -> Command<'static> {
                         // but the archive also holds recipes superseded by
                         // `rotate`, which were never removed. `--archived` is
                         // what the table actually contains.
-                        .arg(Arg::new("archived").long("archived").visible_alias("removed")
+                        .arg(Arg::new("archived").long("archived").action(ArgAction::SetTrue).visible_alias("removed")
                             .help("List superseded recipes (from `rotate` and `remove`) instead")),
                 )
                 .subcommand(
@@ -363,7 +361,7 @@ pub fn build_cli() -> Command<'static> {
                         .arg(id_arg()).arg(user_arg())
                         .arg(length_arg()).arg(symbols_arg()).arg(no_symbols_arg()).arg(suffix_arg())
                         .arg(mode_arg().default_value(DEFAULT_MODE))
-                        .arg(Arg::new("recover").long("recover").takes_value(true)
+                        .arg(Arg::new("recover").long("recover")
                             .value_name("EPOCH")
                             .help("Disaster recovery: overwrite at exactly this epoch, inheriting its recorded recipe")),
                 )
@@ -390,7 +388,7 @@ pub fn build_cli() -> Command<'static> {
                         )
                         .arg_required_else_help(true)
                         .arg(id_arg()).arg(user_arg()).arg(mode_arg()).arg(recover_arg())
-                        .arg(Arg::new("timeout").short('t').long("timeout").takes_value(true)
+                        .arg(Arg::new("timeout").short('t').long("timeout")
                             .default_value("30")
                             .help("Seconds before the clipboard is zeroed (any key zeros early)")),
                 )
@@ -401,7 +399,7 @@ pub fn build_cli() -> Command<'static> {
                         .arg(id_arg()).arg(user_arg())
                         .arg(epoch_arg().help("Explicit new epoch (must exceed the current one)"))
                         .arg(length_arg()).arg(symbols_arg()).arg(no_symbols_arg()).arg(suffix_arg()).arg(mode_arg())
-                        .arg(Arg::new("dry-run").long("dry-run")
+                        .arg(Arg::new("dry-run").long("dry-run").action(ArgAction::SetTrue)
                             .help("Print the outcome (and share token) without updating the keystore")),
                 )
                 .subcommand(
@@ -415,7 +413,7 @@ pub fn build_cli() -> Command<'static> {
                         .about("Show a stored secret on screen in a supervised, timed window (TTY only)")
                         .arg_required_else_help(true)
                         .arg(id_arg()).arg(user_arg()).arg(mode_arg()).arg(recover_arg())
-                        .arg(Arg::new("timeout").short('t').long("timeout").takes_value(true)
+                        .arg(Arg::new("timeout").short('t').long("timeout")
                             .default_value("60")
                             .help("Seconds the secret stays on screen (any key clears early)")),
                 )
@@ -429,7 +427,7 @@ pub fn build_cli() -> Command<'static> {
                     Command::new("apply")
                         .about("Apply a group member's registry share token (shows a diff, asks Y/N)")
                         .arg_required_else_help(true)
-                        .arg(Arg::new("token").takes_value(true).required(true)
+                        .arg(Arg::new("token").required(true)
                             .help("The base58check share token")),
                 )
         })
@@ -451,7 +449,7 @@ pub fn build_cli() -> Command<'static> {
                      included.",
                 )
                 .arg_required_else_help(true)
-                .arg(Arg::new("file").takes_value(true).required(true)
+                .arg(Arg::new("file").required(true)
                     .help("Output path for the encrypted backup")),
         )
         .subcommand(
@@ -470,9 +468,9 @@ pub fn build_cli() -> Command<'static> {
                      a bundle, so --force destroys them without restoring them.",
                 )
                 .arg_required_else_help(true)
-                .arg(Arg::new("file").takes_value(true).required(true)
+                .arg(Arg::new("file").required(true)
                     .help("Path to the encrypted backup"))
-                .arg(Arg::new("force").long("force")
+                .arg(Arg::new("force").long("force").action(ArgAction::SetTrue)
                     .help("Remove the existing keystore first, the bundle replaces it")),
         )
 }
@@ -500,7 +498,7 @@ static KEYSTORE_OVERRIDE: std::sync::OnceLock<std::path::PathBuf> = std::sync::O
 /// Find `--keystore` wherever it appears because it is a global arg its value
 /// surfaces on whichever subcommand level consumed it, so descend to find it.
 fn find_keystore_override(m: &ArgMatches) -> Option<String> {
-    if let Some(v) = m.value_of("keystore") {
+    if let Some(v) = m.get_one::<String>("keystore").map(String::as_str) {
         return Some(v.to_string());
     }
     match m.subcommand() {
@@ -587,7 +585,7 @@ fn survey_mnemonic_identities(
 
 fn cmd_backup(m: &ArgMatches) -> Result<(), String> {
     let ks = keystore()?;
-    let out = std::path::PathBuf::from(m.value_of("file").unwrap());
+    let out = std::path::PathBuf::from(m.get_one::<String>("file").map(String::as_str).unwrap());
 
     // Unlock first: a tampered `origin` must abort before the user is asked to
     // choose a backup passphrase, and long before anything is written.
@@ -644,8 +642,8 @@ fn cmd_restore(m: &ArgMatches) -> Result<(), String> {
     // the location without the availability check (the target may legitimately
     // not exist yet).
     let root = resolve_location()?.path;
-    let input = std::path::PathBuf::from(m.value_of("file").unwrap());
-    let force = m.is_present("force");
+    let input = std::path::PathBuf::from(m.get_one::<String>("file").map(String::as_str).unwrap());
+    let force = m.get_flag("force");
 
     // 0. Guard the target before any prompt, the passphrase and N mnemonics
     //    must not be typed only to discover the target was non-empty.
@@ -933,14 +931,14 @@ fn cmd_keypair(m: &ArgMatches) -> Result<(), String> {
     let ks = keystore()?;
     match m.subcommand() {
         Some(("create", sm)) => {
-            let name = sm.value_of("name").unwrap();
+            let name = sm.get_one::<String>("name").map(String::as_str).unwrap();
             // Vet the name before any prompt: making the user type a mnemonic and
             // a password only to be told the name was reserved is needlessly cruel.
             // The keystore re-checks it; this is the friendly gate, not the real one.
-            check_new_keypair_name(name, sm.is_present("mnemonic"))?;
+            check_new_keypair_name(name, sm.get_flag("mnemonic"))?;
             // Read the mnemonic (if any) BEFORE prompting for a keystore
             // password, so both no-echo prompts happen in a predictable order.
-            let mnemonic_seed = if sm.is_present("mnemonic") {
+            let mnemonic_seed = if sm.get_flag("mnemonic") {
                 Some(prompt_mnemonic_seed()?)
             } else {
                 None
@@ -978,7 +976,7 @@ fn cmd_keypair(m: &ArgMatches) -> Result<(), String> {
             Ok(())
         }
         Some(("show", sm)) => {
-            let name = sm.value_of("name").unwrap();
+            let name = sm.get_one::<String>("name").map(String::as_str).unwrap();
             let public = ks.load_public_identity(name).map_err(se)?;
             // The origin is read without a password and so is unauthenticated;
             // it is shown as information, and never acted on here.
@@ -1015,7 +1013,7 @@ fn cmd_keypair(m: &ArgMatches) -> Result<(), String> {
             Ok(())
         }
         Some(("remove", sm)) => {
-            let name = sm.value_of("name").unwrap();
+            let name = sm.get_one::<String>("name").map(String::as_str).unwrap();
             let cascaded = ks.remove_identity_cascade(name).map_err(se)?;
             for group in &cascaded {
                 println!("Removed shared-secret \"{group}\" (owned by '{name}').");
@@ -1035,10 +1033,10 @@ fn cmd_contact(m: &ArgMatches) -> Result<(), String> {
     let ks = keystore()?;
     match m.subcommand() {
         Some(("add", sm)) => {
-            let token = sm.value_of("token").unwrap();
+            let token = sm.get_one::<String>("token").map(String::as_str).unwrap();
             let (embedded, public) = decode_contact_token(token).map_err(se)?;
             // The token's embedded name is the default alias; --name overrides
-            let alias = match sm.value_of("name") {
+            let alias = match sm.get_one::<String>("name").map(String::as_str) {
                 Some(n) => n.to_string(),
                 None => {
                     if embedded.is_empty() {
@@ -1071,7 +1069,7 @@ fn cmd_contact(m: &ArgMatches) -> Result<(), String> {
             Ok(())
         }
         Some(("show", sm)) => {
-            let alias = sm.value_of("name").unwrap();
+            let alias = sm.get_one::<String>("name").map(String::as_str).unwrap();
             let public = ks.load_contact(alias).map_err(se)?;
             print!(
                 "{}",
@@ -1103,7 +1101,7 @@ fn cmd_contact(m: &ArgMatches) -> Result<(), String> {
             Ok(())
         }
         Some(("remove", sm)) => {
-            let alias = sm.value_of("name").unwrap();
+            let alias = sm.get_one::<String>("name").map(String::as_str).unwrap();
             let cascaded = ks.remove_contact_cascade(alias).map_err(se)?;
             for group in &cascaded {
                 println!("Removed shared-secret \"{group}\" ('{alias}' was a member).");
@@ -1198,7 +1196,7 @@ fn resolve_members(ks: &Keystore, keypair: &str, aliases: &[String]) -> Result<M
 
 /// The `--party` aliases on a command line, in the order given
 fn party_aliases(m: &ArgMatches) -> Vec<String> {
-    m.values_of("party")
+    m.get_many::<String>("party")
         .map(|v| v.map(|s| s.to_string()).collect())
         .unwrap_or_default()
 }
@@ -1213,8 +1211,16 @@ struct ResolvedGroup {
 }
 
 fn resolve_group(ks: &Keystore, m: &ArgMatches) -> Result<ResolvedGroup, String> {
-    let keypair = m.value_of("keypair").unwrap().to_string();
-    let group_name = m.value_of("name").unwrap().to_string();
+    let keypair = m
+        .get_one::<String>("keypair")
+        .map(String::as_str)
+        .unwrap()
+        .to_string();
+    let group_name = m
+        .get_one::<String>("name")
+        .map(String::as_str)
+        .unwrap()
+        .to_string();
     let mem = resolve_members(ks, &keypair, &party_aliases(m))?;
     Ok(ResolvedGroup {
         keypair,
@@ -1246,11 +1252,11 @@ fn cmd_ss_exchange(m: &ArgMatches) -> Result<(), String> {
     let group = resolve_group(&ks, m)?;
 
     let tokens: Vec<&str> = m
-        .values_of("token")
-        .map(|v| v.collect())
+        .get_many::<String>("token")
+        .map(|v| v.map(String::as_str).collect())
         .unwrap_or_default();
-    let force_wizard = m.is_present("wizard");
-    let force_emit = m.is_present("emit-token");
+    let force_wizard = m.get_flag("wizard");
+    let force_emit = m.get_flag("emit-token");
     let interactive = {
         use std::io::IsTerminal;
         std::io::stdin().is_terminal()
@@ -1300,7 +1306,7 @@ fn stored_group_fingerprint(ks: &Keystore, state: &SharedSecretState) -> String 
 
 fn cmd_ss_list(m: &ArgMatches) -> Result<(), String> {
     let ks = keystore()?;
-    let filter = m.value_of("keypair");
+    let filter = m.get_one::<String>("keypair").map(String::as_str);
     if let Some(f) = filter {
         if !ks.identity_exists(f) {
             return Err(format!("no such keypair '{f}'"));
@@ -1362,7 +1368,7 @@ fn group_details(
 
 fn cmd_ss_show(m: &ArgMatches) -> Result<(), String> {
     let ks = keystore()?;
-    let name = m.value_of("name").unwrap();
+    let name = m.get_one::<String>("name").map(String::as_str).unwrap();
     let state = load_group_arg(&ks, name, "show")?;
     // Deliberately metadata-only: K is the group master keying every group
     // `hd-secret` and never leaves the keystore. Its leaf secrets are reached
@@ -1378,7 +1384,7 @@ fn cmd_ss_show(m: &ArgMatches) -> Result<(), String> {
 
 fn cmd_ss_remove(m: &ArgMatches) -> Result<(), String> {
     let ks = keystore()?;
-    let name = m.value_of("name").unwrap();
+    let name = m.get_one::<String>("name").map(String::as_str).unwrap();
     if ks.identity_exists(name) && !ks.shared_secret_exists(name) {
         return Err(format!(
             "'{name}' is a keypair; use `keypair remove {name}` to remove it"
@@ -1553,8 +1559,8 @@ fn stored_group_wrap_key(
 
 fn cmd_ss_export(m: &ArgMatches) -> Result<(), String> {
     let ks = keystore()?;
-    let name = m.value_of("name").unwrap();
-    let out = std::path::PathBuf::from(m.value_of("file").unwrap());
+    let name = m.get_one::<String>("name").map(String::as_str).unwrap();
+    let out = std::path::PathBuf::from(m.get_one::<String>("file").map(String::as_str).unwrap());
     let state = load_group_arg(&ks, name, "export")?;
 
     let parties = state.parties().map_err(se)?;
@@ -1750,9 +1756,13 @@ fn cmd_ss_import_with<T: wizard::Terminal>(term: &mut T, m: &ArgMatches) -> Resu
     use crate::registry::ApplyOutcome;
 
     let ks = keystore()?;
-    let path = std::path::PathBuf::from(m.value_of("file").unwrap());
-    let dry_run = m.is_present("dry-run");
-    let keypair = m.value_of("keypair").unwrap().to_string();
+    let path = std::path::PathBuf::from(m.get_one::<String>("file").map(String::as_str).unwrap());
+    let dry_run = m.get_flag("dry-run");
+    let keypair = m
+        .get_one::<String>("keypair")
+        .map(String::as_str)
+        .unwrap()
+        .to_string();
     let aliases = party_aliases(m);
 
     // 1. A missing file and a bad alias must both fail before the prompt
@@ -2057,7 +2067,7 @@ fn cmd_ss_import_with<T: wizard::Terminal>(term: &mut T, m: &ArgMatches) -> Resu
 // -----------------
 
 fn cmd_hd_secret(m: &ArgMatches) -> Result<(), String> {
-    let owner = m.value_of("owner");
+    let owner = m.get_one::<String>("owner").map(String::as_str);
     // `apply` first: the token itself identifies the group, so an owner is a
     // usage error, not something to silently ignore.
     if let Some(("apply", sm)) = m.subcommand() {
@@ -2318,7 +2328,7 @@ fn cmd_hd_list(owner: &str, m: &ArgMatches) -> Result<(), String> {
     let (rs, seed) = unlock_owner(&ks, owner)?;
     let reg = ks.load_registry(&rs.scope, &seed).map_err(se)?;
     let master = master_for(&ks, &rs, &seed)?;
-    let archived = m.is_present("archived");
+    let archived = m.get_flag("archived");
 
     // Say which kind of owner this registry belongs to
     if rs.group_state.is_some() {
@@ -2433,8 +2443,11 @@ fn def_changes(
 
 fn cmd_hd_create(owner: &str, m: &ArgMatches) -> Result<(), String> {
     let ks = keystore()?;
-    let id = m.value_of("id").unwrap();
-    let user = m.value_of("user").unwrap_or("");
+    let id = m.get_one::<String>("id").map(String::as_str).unwrap();
+    let user = m
+        .get_one::<String>("user")
+        .map(String::as_str)
+        .unwrap_or("");
     // Before any prompt: an id that cannot be displayed safely is a usage error.
     validate_hd_strings(id, user)?;
     let recover = parse_recover(m)?;
@@ -2568,7 +2581,7 @@ fn recover_definition<T: wizard::Terminal>(
 /// Parse `--recover <EPOCH>`, the read-only past-epoch selector. `None` when the
 /// flag is absent, which is the ordinary "use the current definition" path.
 fn parse_recover(m: &ArgMatches) -> Result<Option<u64>, String> {
-    match m.value_of("recover") {
+    match m.get_one::<String>("recover").map(String::as_str) {
         None => Ok(None),
         Some(s) => s
             .parse::<u64>()
@@ -2602,8 +2615,8 @@ fn find_stored_def(
     recover: Option<u64>,
 ) -> Result<(crate::registry::Definition, bool), String> {
     let reg = ks.load_registry(&rs.scope, seed).map_err(se)?;
-    let id = m.value_of("id").unwrap();
-    let user = m.value_of("user");
+    let id = m.get_one::<String>("id").map(String::as_str).unwrap();
+    let user = m.get_one::<String>("user").map(String::as_str);
     let def = match recover {
         Some(epoch) => reg.recipe_at(id, user, epoch).map_err(se)?,
         None => reg.find_one(id, user).map_err(se)?,
@@ -2639,7 +2652,11 @@ fn cmd_hd_copy(owner: &str, m: &ArgMatches) -> Result<(), String> {
     let (def, superseded) = find_stored_def(&ks, &rs, &seed, m, parse_recover(m)?)?;
     let master = master_for(&ks, &rs, &seed)?;
     // Hold the secret in a zeroizing buffer: it is scrubbed the moment it drops
-    let secret = Zeroizing::new(registry_secret(&master, &def, m.value_of("mode"))?);
+    let secret = Zeroizing::new(registry_secret(
+        &master,
+        &def,
+        m.get_one::<String>("mode").map(String::as_str),
+    )?);
     clipboard::copy_to_clipboard(secret.as_str())?;
 
     // Name the recipe a recovery used, before the countdown takes the screen.
@@ -2680,7 +2697,8 @@ fn print_recovery_note(def: &crate::registry::Definition) {
 /// Parse `--timeout` seconds for `copy` (must be ≥ 1)
 fn parse_timeout(m: &ArgMatches) -> Result<u64, String> {
     let secs: u64 = m
-        .value_of("timeout")
+        .get_one::<String>("timeout")
+        .map(String::as_str)
         .unwrap_or("30")
         .parse()
         .map_err(|_| "timeout must be a non-negative integer (seconds)".to_string())?;
@@ -2692,9 +2710,12 @@ fn parse_timeout(m: &ArgMatches) -> Result<u64, String> {
 
 fn cmd_hd_rotate(owner: &str, m: &ArgMatches) -> Result<(), String> {
     let ks = keystore()?;
-    let id = m.value_of("id").unwrap();
-    let user = m.value_of("user").unwrap_or("");
-    let epoch_override: Option<u64> = match m.value_of("epoch") {
+    let id = m.get_one::<String>("id").map(String::as_str).unwrap();
+    let user = m
+        .get_one::<String>("user")
+        .map(String::as_str)
+        .unwrap_or("");
+    let epoch_override: Option<u64> = match m.get_one::<String>("epoch").map(String::as_str) {
         None => None,
         Some(s) => Some(
             s.parse()
@@ -2728,7 +2749,7 @@ fn cmd_hd_rotate(owner: &str, m: &ArgMatches) -> Result<(), String> {
 
     // `reg.rotate` only mutates the in-memory registry; skipping the save is
     // all a dry run needs.
-    let dry_run = m.is_present("dry-run");
+    let dry_run = m.get_flag("dry-run");
     let def = reg
         .rotate(id, user, Some(merged), epoch_override)
         .map_err(se)?
@@ -2760,8 +2781,11 @@ fn cmd_hd_rotate(owner: &str, m: &ArgMatches) -> Result<(), String> {
 
 fn cmd_hd_remove(owner: &str, m: &ArgMatches) -> Result<(), String> {
     let ks = keystore()?;
-    let id = m.value_of("id").unwrap();
-    let user = m.value_of("user").unwrap_or("");
+    let id = m.get_one::<String>("id").map(String::as_str).unwrap();
+    let user = m
+        .get_one::<String>("user")
+        .map(String::as_str)
+        .unwrap_or("");
 
     let (rs, seed) = unlock_owner(&ks, owner)?;
     let mut reg = ks.load_registry(&rs.scope, &seed).map_err(se)?;
@@ -2802,7 +2826,11 @@ fn cmd_hd_reveal(owner: &str, m: &ArgMatches) -> Result<(), String> {
     let (def, superseded) = find_stored_def(&ks, &rs, &seed, m, parse_recover(m)?)?;
     let master = master_for(&ks, &rs, &seed)?;
     // Hold the secret in a zeroizing buffer: scrubbed the moment it drops
-    let secret = Zeroizing::new(registry_secret(&master, &def, m.value_of("mode"))?);
+    let secret = Zeroizing::new(registry_secret(
+        &master,
+        &def,
+        m.get_one::<String>("mode").map(String::as_str),
+    )?);
     let timeout = std::time::Duration::from_secs(parse_timeout(m)?);
 
     // On the main screen, before the alt screen takes over: the note carries no
@@ -2944,7 +2972,10 @@ fn cmd_hd_share(owner: &str, m: &ArgMatches) -> Result<(), String> {
 }
 
 fn cmd_hd_apply(m: &ArgMatches) -> Result<(), String> {
-    hd_apply(&mut StdioTerminal::new(), m.value_of("token").unwrap())
+    hd_apply(
+        &mut StdioTerminal::new(),
+        m.get_one::<String>("token").map(String::as_str).unwrap(),
+    )
 }
 
 /// Apply one incoming share token: identify its group by recomputing every
@@ -3275,13 +3306,19 @@ fn validate_params(p: &crate::registry::Params) -> Result<(), String> {
 /// mode, length and alphabet it used. A later change to `DEFAULT_LENGTH` or
 /// `SYMBOLS` therefore cannot alter an existing password.
 fn parse_params(m: &ArgMatches) -> Result<crate::registry::Params, String> {
-    let mode = m.value_of("mode").unwrap_or(DEFAULT_MODE).to_string();
+    let mode = m
+        .get_one::<String>("mode")
+        .map(String::as_str)
+        .unwrap_or(DEFAULT_MODE)
+        .to_string();
     let (default_length, default_symbols) = mode_defaults(&mode);
 
-    let symbols = if m.is_present("no-symbols") {
+    let symbols = if m.get_flag("no-symbols") {
         None
-    } else if m.is_present("symbols") {
-        m.value_of("symbols").map(str::to_string)
+    } else if m.contains_id("symbols") {
+        m.get_one::<String>("symbols")
+            .map(String::as_str)
+            .map(str::to_string)
     } else {
         // `alpha`/`bip39` take no symbol set (a bare `--mode alpha` must not
         // become an error about a flag the user never typed), and a bare
@@ -3298,7 +3335,10 @@ fn parse_params(m: &ArgMatches) -> Result<crate::registry::Params, String> {
         mode,
         length,
         symbols,
-        suffix: m.value_of("suffix").map(|s| s.to_string()),
+        suffix: m
+            .get_one::<String>("suffix")
+            .map(String::as_str)
+            .map(|s| s.to_string()),
     };
     validate_params(&params)?;
     Ok(params)
@@ -3307,14 +3347,17 @@ fn parse_params(m: &ArgMatches) -> Result<crate::registry::Params, String> {
 /// The `--mode` the user actually typed, as opposed to the one clap filled in.
 ///
 /// `rotate`'s `--mode` has no default, so `value_of` alone would do; `create`'s
-/// defaults to [`DEFAULT_MODE`], and there `value_of` is always `Some`. A merge
-/// driven by `value_of` would therefore silently rewrite an inherited mode to
-/// `b58` on every `create --recover`. `occurrences_of` counts only what was
-/// supplied on the command line.
+/// defaults to [`DEFAULT_MODE`], and there `get_one` is always `Some`. A merge
+/// driven by `get_one` would therefore silently rewrite an inherited mode to
+/// `b58` on every `create --recover`. `value_source` distinguishes a value
+/// supplied on the command line from a filled-in default.
 fn explicit_mode(m: &ArgMatches) -> Option<&str> {
-    (m.occurrences_of("mode") > 0)
-        .then(|| m.value_of("mode"))
-        .flatten()
+    matches!(
+        m.value_source("mode"),
+        Some(clap::parser::ValueSource::CommandLine)
+    )
+    .then(|| m.get_one::<String>("mode").map(String::as_str))
+    .flatten()
 }
 
 /// Merge provided formatting flags over `base` (for `rotate` and
@@ -3343,11 +3386,13 @@ fn merge_params(
 
     // --symbols[=set] / --no-symbols switch it on/off (they conflict, so at most
     // one is present); absent both, the base set carries over.
-    let symbols_asked_for = m.is_present("symbols");
-    let mut symbols = if m.is_present("no-symbols") {
+    let symbols_asked_for = m.contains_id("symbols");
+    let mut symbols = if m.get_flag("no-symbols") {
         None
     } else if symbols_asked_for {
-        m.value_of("symbols").map(str::to_string)
+        m.get_one::<String>("symbols")
+            .map(String::as_str)
+            .map(str::to_string)
     } else {
         base.symbols
     };
@@ -3363,15 +3408,17 @@ fn merge_params(
         symbols = None;
     }
 
-    let length_asked_for = m.value_of("length").is_some();
+    let length_asked_for = m.get_one::<String>("length").map(String::as_str).is_some();
     let mut length = if length_asked_for {
         parse_length(m)?
     } else {
         base.length
     };
-    let suffix_asked_for = m.value_of("suffix").is_some();
+    let suffix_asked_for = m.get_one::<String>("suffix").map(String::as_str).is_some();
     let mut suffix = if suffix_asked_for {
-        m.value_of("suffix").map(|s| s.to_string())
+        m.get_one::<String>("suffix")
+            .map(String::as_str)
+            .map(|s| s.to_string())
     } else {
         base.suffix
     };
@@ -3405,7 +3452,7 @@ fn merge_params(
 
 /// Parse `--length` as a number; the mode-aware bounds live in [`validate_params`].
 fn parse_length(m: &ArgMatches) -> Result<Option<u64>, String> {
-    match m.value_of("length") {
+    match m.get_one::<String>("length").map(String::as_str) {
         None => Ok(None),
         Some(s) => Ok(Some(
             s.parse()
@@ -3678,8 +3725,11 @@ mod tests {
     #[test]
     fn bare_symbols_resolves_to_the_default_set() {
         let m = create_matches(&["--symbols"]).unwrap();
-        assert!(m.is_present("symbols"));
-        assert_eq!(m.value_of("symbols"), Some(format::SYMBOLS));
+        assert!(m.contains_id("symbols"));
+        assert_eq!(
+            m.get_one::<String>("symbols").map(String::as_str),
+            Some(format::SYMBOLS)
+        );
         assert_eq!(
             parse_params(&m).unwrap().symbols.as_deref(),
             Some(format::SYMBOLS)
@@ -3689,17 +3739,22 @@ mod tests {
     #[test]
     fn symbols_takes_an_explicit_set_after_an_equals_sign() {
         let m = create_matches(&["--symbols=!@#"]).unwrap();
-        assert_eq!(m.value_of("symbols"), Some("!@#"));
+        assert_eq!(
+            m.get_one::<String>("symbols").map(String::as_str),
+            Some("!@#")
+        );
         assert_eq!(parse_params(&m).unwrap().symbols.as_deref(), Some("!@#"));
     }
 
     #[test]
     fn symbols_may_be_given_at_most_once() {
+        // clap 4 reports a repeated single-value arg as ArgumentConflict
+        // ("cannot be used multiple times") rather than TooManyValues.
         assert_eq!(
             create_matches(&["--symbols=a", "--symbols=b"])
                 .unwrap_err()
                 .kind(),
-            clap::ErrorKind::TooManyValues
+            clap::error::ErrorKind::ArgumentConflict
         );
     }
 
@@ -3707,7 +3762,7 @@ mod tests {
     #[test]
     fn an_explicitly_empty_symbol_set_is_rejected() {
         let m = create_matches(&["--symbols="]).unwrap();
-        assert_eq!(m.value_of("symbols"), Some(""));
+        assert_eq!(m.get_one::<String>("symbols").map(String::as_str), Some(""));
         assert!(parse_params(&m).is_err());
     }
 
@@ -3715,8 +3770,14 @@ mod tests {
     #[test]
     fn bare_symbols_does_not_swallow_the_following_flag() {
         let m = create_matches(&["--symbols", "--length", "20"]).unwrap();
-        assert_eq!(m.value_of("symbols"), Some(format::SYMBOLS));
-        assert_eq!(m.value_of("length"), Some("20"));
+        assert_eq!(
+            m.get_one::<String>("symbols").map(String::as_str),
+            Some(format::SYMBOLS)
+        );
+        assert_eq!(
+            m.get_one::<String>("length").map(String::as_str),
+            Some("20")
+        );
     }
 
     #[test]
@@ -3725,7 +3786,7 @@ mod tests {
             create_matches(&["--symbols", "--no-symbols"])
                 .unwrap_err()
                 .kind(),
-            clap::ErrorKind::ArgumentConflict
+            clap::error::ErrorKind::ArgumentConflict
         );
     }
 
