@@ -180,7 +180,7 @@ pub fn build_cli() -> Command {
                 .arg_required_else_help(true)
                 .subcommand(
                     Command::new("create")
-                        .about("Form a shared secret with pinned contacts and store it")
+                        .about("Create a shared secret with pinned contacts")
                         .arg_required_else_help(true)
                         .arg(Arg::new("name").required(true)
                             .help("Agreed group name (also the storage key)"))
@@ -205,7 +205,7 @@ pub fn build_cli() -> Command {
                 )
                 .subcommand(
                     Command::new("show")
-                        .about("Show a group's metadata (the secret K never leaves the keystore)")
+                        .about("Show a shared secret's metadata (the secret K never leaves the keystore)")
                         .arg_required_else_help(true)
                         .arg(group_arg()),
                 )
@@ -224,7 +224,7 @@ pub fn build_cli() -> Command {
                 // would be a silent breaking change.
                 .subcommand(
                     Command::new("export")
-                        .about("Write an encrypted, member-only backup of a group and its registry")
+                        .about("Write an encrypted, member-only backup of a group and its registry (no secrets exported")
                         .long_about(
                             "Write one encrypted file holding everything a fellow member needs \
                              to rebuild this group and its hd-secret registry from nothing but \
