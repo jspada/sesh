@@ -4,25 +4,27 @@
   <img src="screenshot.png" alt="sesh in action" width="700">
 </p>
 
-Sesh is a password safe supporting both single-user and multi-user scenarios.
-It allows 2 or 3 distributed users to create and maintain a shared, replicated
-password safe without ever transmitting secret information. Its multi-user
-password safes works by establishing **2- and 3-party shared secrets** over an
+Sesh is a **keysafe**: it derives and manages passwords and PINs like a
+password safe, but also cryptographic keys and BIP39 mnemonics, all from
+a single master secret, for one user or shared between 2–3 users. It allows
+distributed users to create and maintain a shared, replicated
+keysafe without ever transmitting secret information. Its multi-user
+keysafes works by establishing **2- and 3-party shared secrets** over an
 insecure channel using **BLS12-381**, backed by an **encrypted local keystore**.
 
-There is only one master secret stored per password safe. Everything else
+There is only one master secret stored per keysafe. Everything else
 (secretes, shared-secrets and passwords) is hierarchically and
 deterministically (HD) derived (only when needed) from the master secret. This
 approach has many advantages, in addition to never transmitting secrets.
 
-Sesh password safes only needs a single initial backup, unless the corresponding
+Sesh keysafes only needs a single initial backup, unless the corresponding
 keypair's secret was initialised from a mnemonic, in which case no backup is
 required. In both scenarios, subsequent backups are not required when passwords
 are created or updated (more on this later).
 
 For convenience sesh provides full backup and restore functionality for master
 secrets and their corresponding metadata, and also a decentralized secret-share
-password safe backup mechanism that works without transmitting secrets. Mnemonic
+keysafe backup mechanism that works without transmitting secrets. Mnemonic
 master secrets are not backed up by sesh, but their corresponding metadata can be.
 
 For the decentralized shared-secret backup the group's master `K` is
@@ -133,7 +135,7 @@ default_keystore_path = "/path/to/alternate/sesh/store"
 
 If that path is a removable device, you can also set the optional
 `default_keystore_id = "<uuid>"` (copy it from the store's `<keystore>/config.toml`)
-so that sesh refuses a different password safe (e.g. from a different device
+so that sesh refuses a different keystore (e.g. from a different device
 mounted at the same path). Sesh refuses a `config.toml` that is
 group/world-writable or not owned by you because whoever edits that file redirects
 where your secrets are written.  `$SESH_HOME` and the global `--keystore <dir>` flag
@@ -368,7 +370,7 @@ group-bound **share tokens** with no secret material, just the recipe.
 `share`. Other members import them:
 
 ```console
-$ sesh hd-secret apply <share-token>   # Apply an password safe update, where
+$ sesh hd-secret apply <share-token>   # Apply an keysafe update, where
                                        #   the token identifies the group automatically
 $ sesh hd-secret share OurGroup vpn    # Re-share a stored entry (no secret transmitted)
 ```
