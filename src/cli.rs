@@ -135,6 +135,12 @@ pub fn build_cli() -> Command {
                         .about("Remove an identity (cascades the shared-secrets it owns)")
                         .arg_required_else_help(true)
                         .arg(name_arg("Identity name")),
+                )
+                .subcommand(
+                    Command::new("password")
+                        .about("Change the password of an identity")
+                        .arg_required_else_help(true)
+                        .arg(name_arg("Identity name")),
                 ),
         )
         // contact subcommand
@@ -693,7 +699,7 @@ fn cmd_restore(m: &ArgMatches) -> Result<(), String> {
                 id.name, id.fingerprint
             ));
         }
-        let password = prompt_new_password()?;
+        let password = prompt_new_password("Set keypair password: ")?;
         recovered.push((id.name.clone(), seed, password));
     }
 
@@ -833,16 +839,19 @@ fn unlock_password(name: &str) -> Result<Zeroizing<String>, String> {
     Ok(Zeroizing::new(pw))
 }
 
-fn prompt_new_password() -> Result<Zeroizing<String>, String> {
-    let p1 = read_password_noecho("Set keystore password: ").map_err(se)?;
-    let p2 = read_password_noecho("Confirm password: ").map_err(se)?;
+/// Prompt (twice, no echo) for a new password. Both reads are wrapped in
+/// `Zeroizing` immediately, so the confirmation copy and the mismatch/empty
+/// error paths leave no plaintext behind in freed heap memory.
+fn prompt_new_password(prompt: &str) -> Result<Zeroizing<String>, String> {
+    let p1 = Zeroizing::new(read_password_noecho(prompt).map_err(se)?);
+    let p2 = Zeroizing::new(read_password_noecho("Confirm password: ").map_err(se)?);
     if p1 != p2 {
         return Err("passwords do not match".into());
     }
     if p1.is_empty() {
         return Err("password must not be empty".into());
     }
-    Ok(Zeroizing::new(p1))
+    Ok(p1)
 }
 
 /// Prompt (no echo, never on argv) for a 24-word BIP39 mnemonic and turn it
@@ -943,7 +952,7 @@ fn cmd_keypair(m: &ArgMatches) -> Result<(), String> {
             } else {
                 None
             };
-            let password = prompt_new_password()?;
+            let password = prompt_new_password("Set keypair password: ")?;
             let origin = match &mnemonic_seed {
                 Some(_) => SeedOrigin::Mnemonic,
                 None => SeedOrigin::Random,
@@ -1019,6 +1028,17 @@ fn cmd_keypair(m: &ArgMatches) -> Result<(), String> {
                 println!("Removed shared-secret \"{group}\" (owned by '{name}').");
             }
             println!("Removed identity '{name}'.");
+            Ok(())
+        }
+        Some(("password", sm)) => {
+            let name = sm.get_one::<String>("name").map(String::as_str).unwrap();
+            // Vet the name before any prompt: a missing identity should fail
+            // before the user types two passwords, not after.
+            ks.load_public_identity(name).map_err(se)?;
+            let old = unlock_password(name)?;
+            let new = prompt_new_password("Set new keypair password: ")?;
+            ks.change_identity_password(name, &old, &new).map_err(se)?;
+            println!("Password changed for identity '{name}'.");
             Ok(())
         }
         _ => Err("unknown keypair subcommand".into()),

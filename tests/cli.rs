@@ -163,6 +163,73 @@ fn keypair_new_show_list_remove() {
 }
 
 #[test]
+fn keypair_password_change() {
+    let home = TempDir::new().unwrap();
+    make_identity(home.path(), "me");
+
+    // Unlock with the current password, then set + confirm the new one
+    sesh(home.path())
+        .args(["keypair", "password", "me"])
+        .write_stdin(format!("{PW}\nnew\nnew\n"))
+        .assert()
+        .success()
+        .stdout(contains("Password changed for identity 'me'"));
+
+    // The old password no longer unlocks a seed-touching command...
+    sesh_pw(home.path())
+        .args(["hd-secret", "me", "create", "google.com"])
+        .assert()
+        .failure()
+        .stderr(contains("wrong password"));
+
+    // ...and the new one does
+    sesh(home.path())
+        .args(["hd-secret", "me", "create", "google.com"])
+        .write_stdin("new\n")
+        .assert()
+        .success();
+}
+
+#[test]
+fn keypair_password_wrong_current_password_fails() {
+    let home = TempDir::new().unwrap();
+    make_identity(home.path(), "me");
+    sesh(home.path())
+        .args(["keypair", "password", "me"])
+        .write_stdin("wrong\nnew\nnew\n")
+        .assert()
+        .failure()
+        .stderr(contains("wrong password"));
+    // The original password still works
+    run_pw(home.path(), &["hd-secret", "me", "create", "google.com"]);
+}
+
+#[test]
+fn keypair_password_mismatched_confirmation_fails() {
+    let home = TempDir::new().unwrap();
+    make_identity(home.path(), "me");
+    sesh(home.path())
+        .args(["keypair", "password", "me"])
+        .write_stdin(format!("{PW}\nnew\nother\n"))
+        .assert()
+        .failure()
+        .stderr(contains("do not match"));
+    run_pw(home.path(), &["hd-secret", "me", "create", "google.com"]);
+}
+
+#[test]
+fn keypair_password_unknown_identity_fails_before_prompting() {
+    let home = TempDir::new().unwrap();
+    make_identity(home.path(), "me");
+    // No stdin at all: the name must be vetted before any password prompt runs
+    sesh(home.path())
+        .args(["keypair", "password", "ghost"])
+        .assert()
+        .failure()
+        .stderr(contains("No such keystore entry"));
+}
+
+#[test]
 fn contact_add_show_list_remove() {
     let home = TempDir::new().unwrap();
     make_identity(home.path(), "me");
@@ -347,7 +414,7 @@ fn reserved_names_rejected_at_creation() {
         .assert()
         .failure()
         .stderr(contains("reserved"))
-        .stderr(contains("Set keystore password").not());
+        .stderr(contains("Set keypair password").not());
     let ph = TempDir::new().unwrap();
     let token = make_identity(ph.path(), "bob");
     sesh(home.path())
@@ -3005,7 +3072,7 @@ fn a_mnemonic_phrase_passed_as_an_argument_is_refused_and_never_echoed() {
         "prompted anyway:\n{stderr}"
     );
     assert!(
-        !stderr.contains("Set keystore password"),
+        !stderr.contains("Set keypair password"),
         "prompted anyway:\n{stderr}"
     );
     // And nothing whatsoever reached the disk
@@ -3042,7 +3109,7 @@ const ONES_MNEMONIC: &str = "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo \
 
 // Import identity `name` from `mnemonic` into `home` under [`PW`]; return the
 // `keypair create` output block. The mnemonic is prompted for first, then the
-// new keystore password twice.
+// new keypair password twice.
 fn import_mnemonic(home: &Path, name: &str, mnemonic: &str) -> String {
     let out = sesh(home)
         .args(["keypair", "create", name, "--mnemonic"])
@@ -3100,7 +3167,7 @@ fn keypair_mnemonic_recovers_keypair_owned_hd_secrets() {
 #[test]
 fn keypair_mnemonic_can_be_encrypted_and_unlocks() {
     let home = TempDir::new().unwrap();
-    // Mnemonic line, then the new keystore password twice
+    // Mnemonic line, then the new keypair password twice
     sesh(home.path())
         .args(["keypair", "create", "me", "--mnemonic"])
         .write_stdin(format!("{ZERO_MNEMONIC}\npw\npw\n"))

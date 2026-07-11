@@ -163,7 +163,7 @@ display-only override of the stored encoding.
 ### 1. Each party creates an identity and shares its contact token
 
 ```console
-$ sesh keypair create alice            # Prompts for a keystore password
+$ sesh keypair create alice            # Prompts for a keypair password
 Name:          alice
 Fingerprint:   4XkTeGVLnn6
 Contact token: 2Rz...                  # Share this over a secure channel
@@ -181,6 +181,10 @@ your shell history and visible in the process list. Otherwise, it generate a ran
 keypair using cryptographically strong entroy. A random-seed keypair recovers via
 `backup`/`restore` and a mnemonic keypair is recovered by re-entering the
 mnemonic and associated metadata for the shared-secrets and hd-secrets.
+
+To change a keypair's password, use `sesh keypair password <name>`. It prompts
+for the current password, then the new one twice, and re-encrypts the seed in
+place with a fresh salt and nonce.
 
 ### 2. Pin each peer as a contact
 

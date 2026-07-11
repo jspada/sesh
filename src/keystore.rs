@@ -94,7 +94,7 @@ pub enum KeystoreError {
     InvalidName(String),
     /// A protocol-level failure (bad signature, pin mismatch, party count)
     Protocol(ProtocolError),
-    /// A contact alias is already pinned to a *different* long-term key —
+    /// A contact alias is already pinned to a *different* long-term key,
     /// refusing to silently overwrite. Rotate = remove then re-add after
     /// out-of-band re-verification.
     PinConflict(String),
@@ -168,7 +168,7 @@ pub type Result<T> = std::result::Result<T, KeystoreError>;
 /// Every versioned reader (here and in [`crate::backup`]) calls this *before*
 /// `serde_json::from_slice`, never after. A version check that runs after the
 /// full parse can only ever reject a record the current code was already able to
-/// read; the moment a bump adds a required field or retires an enum variant —
+/// read; the moment a bump adds a required field or retires an enum variant,
 /// which is what a bump is *for*. The old record dies inside serde with
 /// `missing field ...` and the clean `unsupported version N` never runs.
 ///
@@ -422,44 +422,54 @@ impl Keystore {
             )));
         }
 
-        let public = crypto::public_identity_from_seed(seed);
-        let pubkeys = pubkeys_record(&public);
-        let aad = identity_aad(IDENTITY_VERSION, origin, &public);
-
-        let mut salt = [0u8; KDF_SALT_LEN];
-        OsRng.fill_bytes(&mut salt);
-        let mut nonce = [0u8; AEAD_NONCE_LEN];
-        OsRng.fill_bytes(&mut nonce);
-
-        let key = derive_key(password.as_bytes(), &salt)?;
-        let ciphertext = aead_encrypt(&*key, &nonce, seed.as_slice(), &aad)?;
-
-        let seed_record = SeedRecord::Encrypted {
-            kdf: KdfRecord {
-                algorithm: KDF_ALGORITHM.into(),
-                salt: hex::encode(salt),
-                m_cost: ARGON2_M_COST,
-                t_cost: ARGON2_T_COST,
-                p_cost: ARGON2_P_COST,
-            },
-            cipher: CipherRecord {
-                algorithm: CIPHER_ALGORITHM.into(),
-                nonce: hex::encode(nonce),
-                ciphertext: hex::encode(ciphertext),
-            },
-        };
-
-        let record = IdentityRecord {
-            version: IDENTITY_VERSION,
-            pubkeys,
+        let (record, public) = encrypt_identity_record(
+            seed,
+            password,
             origin,
-            seed: seed_record,
-        };
+            ARGON2_M_COST,
+            ARGON2_T_COST,
+            ARGON2_P_COST,
+        )?;
         let json = serde_json::to_vec_pretty(&record)?;
 
         create_dir_secure(&self.keypair_dir(name))?;
         write_atomic_secure(&path, &json)?;
         Ok(public)
+    }
+
+    /// Re-encrypt identity `name`'s seed under `new_password`.
+    ///
+    /// `old_password` must decrypt the record, which authenticates the schema
+    /// version, the [`SeedOrigin`], and the public keys via the AAD. The record
+    /// is then rewritten in place (atomically) with a fresh salt and nonce and
+    /// the origin the decryption just authenticated. Any failure leaves the
+    /// file untouched.
+    ///
+    /// Each Argon2 cost is the **max** of the record's stored value and this
+    /// build's default: a password change upgrades an old wrap to current
+    /// defaults, but can never weaken one written with stronger parameters
+    /// (say, by a newer build). The stored costs were bounds-checked against
+    /// `ARGON2_MAX_*` during decryption.
+    pub fn change_identity_password(
+        &self,
+        name: &str,
+        old_password: &str,
+        new_password: &str,
+    ) -> Result<()> {
+        validate_name(name)?;
+        let record = self.read_identity_record(name)?;
+        let seed = decrypt_identity_record(&record, old_password)?;
+        let SeedRecord::Encrypted { kdf, .. } = &record.seed;
+        let (new_record, _) = encrypt_identity_record(
+            &seed,
+            new_password,
+            record.origin,
+            kdf.m_cost.max(ARGON2_M_COST),
+            kdf.t_cost.max(ARGON2_T_COST),
+            kdf.p_cost.max(ARGON2_P_COST),
+        )?;
+        let json = serde_json::to_vec_pretty(&new_record)?;
+        write_atomic_secure(&self.identity_path(name), &json)
     }
 
     /// Load an identity's public keys without needing the password
@@ -554,71 +564,14 @@ impl Keystore {
 
     /// Decrypt and return an identity's seed.
     ///
-    /// Every seed is AEAD-protected, so `aad` (which binds the schema version,
-    /// the [`SeedOrigin`], and every public key) is authenticated on **every**
-    /// path through this function. A successful return is therefore the only
-    /// proof that the record's `origin` is the one its owner wrote.
+    /// Every seed is AEAD-protected, and decryption (`decrypt_identity_record`,
+    /// where the invariant is documented) authenticates the schema version, the
+    /// [`SeedOrigin`], and every public key. A successful return is therefore
+    /// the only proof that the record's `origin` is the one its owner wrote.
     pub fn load_seed(&self, name: &str, password: &str) -> Result<Zeroizing<[u8; SEED_BYTES]>> {
         validate_name(name)?;
         let record = self.read_identity_record(name)?;
-        let public = public_from_record(&record.pubkeys)?;
-        let aad = identity_aad(record.version, record.origin, &public);
-
-        let seed = {
-            let SeedRecord::Encrypted { kdf, cipher } = &record.seed;
-            if kdf.algorithm != KDF_ALGORITHM {
-                return Err(KeystoreError::BadFormat(format!(
-                    "unsupported KDF algorithm '{}'",
-                    kdf.algorithm
-                )));
-            }
-            if cipher.algorithm != CIPHER_ALGORITHM {
-                return Err(KeystoreError::BadFormat(format!(
-                    "unsupported cipher algorithm '{}'",
-                    cipher.algorithm
-                )));
-            }
-            // Decrypt with the parameters the file was written with (so a
-            // future change to the defaults cannot lock old stores out),
-            // bounded so a tampered file cannot demand absurd resources.
-            if kdf.m_cost > ARGON2_MAX_M_COST
-                || kdf.t_cost > ARGON2_MAX_T_COST
-                || kdf.p_cost > ARGON2_MAX_P_COST
-            {
-                return Err(KeystoreError::BadFormat(
-                    "stored Argon2 parameters exceed the accepted bounds".into(),
-                ));
-            }
-            let salt = decode_hex_array::<KDF_SALT_LEN>(&kdf.salt, "salt")?;
-            let nonce = decode_hex_array::<AEAD_NONCE_LEN>(&cipher.nonce, "nonce")?;
-            let ct = hex::decode(&cipher.ciphertext)
-                .map_err(|e| KeystoreError::BadFormat(format!("ciphertext: {e}")))?;
-            let key = derive_key_with(
-                password.as_bytes(),
-                &salt,
-                kdf.m_cost,
-                kdf.t_cost,
-                kdf.p_cost,
-            )?;
-            let pt = aead_decrypt(&*key, &nonce, &ct, &aad)?;
-            if pt.len() != SEED_BYTES {
-                return Err(KeystoreError::BadFormat(
-                    "decrypted seed has wrong length".into(),
-                ));
-            }
-            let mut bytes = [0u8; SEED_BYTES];
-            bytes.copy_from_slice(&pt);
-            Zeroizing::new(bytes)
-        };
-
-        // Defense-in-depth: the (plaintext) stored pubkeys must match what the
-        // seed actually derives to, else the record has been tampered with.
-        if crypto::public_identity_from_seed(&seed) != public {
-            return Err(KeystoreError::BadFormat(
-                "stored public keys do not match the seed".into(),
-            ));
-        }
-        Ok(seed)
+        decrypt_identity_record(&record, password)
     }
 
     fn read_identity_record(&self, name: &str) -> Result<IdentityRecord> {
@@ -1159,18 +1112,131 @@ fn identity_aad(version: u32, origin: SeedOrigin, public: &PublicIdentity) -> Ve
     aad
 }
 
+/// Assemble a freshly encrypted [`IdentityRecord`] for `seed` under `password`:
+/// new random salt and nonce, the given Argon2 parameters (recorded in the
+/// [`KdfRecord`]), and an AAD binding [`IDENTITY_VERSION`], `origin`, and the
+/// seed's public keys.
+fn encrypt_identity_record(
+    seed: &[u8; SEED_BYTES],
+    password: &str,
+    origin: SeedOrigin,
+    m_cost: u32,
+    t_cost: u32,
+    p_cost: u32,
+) -> Result<(IdentityRecord, PublicIdentity)> {
+    let public = crypto::public_identity_from_seed(seed);
+    let pubkeys = pubkeys_record(&public);
+    let aad = identity_aad(IDENTITY_VERSION, origin, &public);
+
+    let mut salt = [0u8; KDF_SALT_LEN];
+    OsRng.fill_bytes(&mut salt);
+    let mut nonce = [0u8; AEAD_NONCE_LEN];
+    OsRng.fill_bytes(&mut nonce);
+
+    let key = derive_key_with(password.as_bytes(), &salt, m_cost, t_cost, p_cost)?;
+    let ciphertext = aead_encrypt(&*key, &nonce, seed.as_slice(), &aad)?;
+
+    let seed_record = SeedRecord::Encrypted {
+        kdf: KdfRecord {
+            algorithm: KDF_ALGORITHM.into(),
+            salt: hex::encode(salt),
+            m_cost,
+            t_cost,
+            p_cost,
+        },
+        cipher: CipherRecord {
+            algorithm: CIPHER_ALGORITHM.into(),
+            nonce: hex::encode(nonce),
+            ciphertext: hex::encode(ciphertext),
+        },
+    };
+
+    let record = IdentityRecord {
+        version: IDENTITY_VERSION,
+        pubkeys,
+        origin,
+        seed: seed_record,
+    };
+    Ok((record, public))
+}
+
+/// Decrypt `record`'s seed with `password`. The AAD is rebuilt from the
+/// record's own `version`, `origin`, and pubkeys, so all three are
+/// authenticated on every path through this function.
+fn decrypt_identity_record(
+    record: &IdentityRecord,
+    password: &str,
+) -> Result<Zeroizing<[u8; SEED_BYTES]>> {
+    let public = public_from_record(&record.pubkeys)?;
+    let aad = identity_aad(record.version, record.origin, &public);
+
+    let seed = {
+        let SeedRecord::Encrypted { kdf, cipher } = &record.seed;
+        if kdf.algorithm != KDF_ALGORITHM {
+            return Err(KeystoreError::BadFormat(format!(
+                "unsupported KDF algorithm '{}'",
+                kdf.algorithm
+            )));
+        }
+        if cipher.algorithm != CIPHER_ALGORITHM {
+            return Err(KeystoreError::BadFormat(format!(
+                "unsupported cipher algorithm '{}'",
+                cipher.algorithm
+            )));
+        }
+        // Decrypt with the parameters the file was written with (so a
+        // future change to the defaults cannot lock old stores out),
+        // bounded so a tampered file cannot demand absurd resources.
+        if kdf.m_cost > ARGON2_MAX_M_COST
+            || kdf.t_cost > ARGON2_MAX_T_COST
+            || kdf.p_cost > ARGON2_MAX_P_COST
+        {
+            return Err(KeystoreError::BadFormat(
+                "stored Argon2 parameters exceed the accepted bounds".into(),
+            ));
+        }
+        let salt = decode_hex_array::<KDF_SALT_LEN>(&kdf.salt, "salt")?;
+        let nonce = decode_hex_array::<AEAD_NONCE_LEN>(&cipher.nonce, "nonce")?;
+        let ct = hex::decode(&cipher.ciphertext)
+            .map_err(|e| KeystoreError::BadFormat(format!("ciphertext: {e}")))?;
+        let key = derive_key_with(
+            password.as_bytes(),
+            &salt,
+            kdf.m_cost,
+            kdf.t_cost,
+            kdf.p_cost,
+        )?;
+        // Zeroizing: the Vec briefly holds the raw seed, and must not leave it
+        // behind in freed heap memory (including on the length-error return).
+        let pt = Zeroizing::new(aead_decrypt(&*key, &nonce, &ct, &aad)?);
+        if pt.len() != SEED_BYTES {
+            return Err(KeystoreError::BadFormat(
+                "decrypted seed has wrong length".into(),
+            ));
+        }
+        let mut bytes = [0u8; SEED_BYTES];
+        bytes.copy_from_slice(&pt);
+        Zeroizing::new(bytes)
+    };
+
+    // Defense-in-depth: the (plaintext) stored pubkeys must match what the
+    // seed actually derives to, else the record has been tampered with.
+    if crypto::public_identity_from_seed(&seed) != public {
+        return Err(KeystoreError::BadFormat(
+            "stored public keys do not match the seed".into(),
+        ));
+    }
+    Ok(seed)
+}
+
 // --------------
 // Crypto helpers
 // --------------
 
-/// Derive the AEAD key with this build's default Argon2id parameters (the
-/// encryption path; new records always use the current defaults).
-fn derive_key(password: &[u8], salt: &[u8]) -> Result<Zeroizing<[u8; AEAD_KEY_LEN]>> {
-    derive_key_with(password, salt, ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST)
-}
-
-/// Derive the AEAD key with explicit Argon2id parameters (the decryption path;
-/// honors what the record was written with; bounds-checked by the caller).
+/// Derive the AEAD key with explicit Argon2id parameters. Decryption honors
+/// what the record was written with (bounds-checked by the caller); encryption
+/// passes this build's defaults, or the max of those and the stored costs on a
+/// password change.
 fn derive_key_with(
     password: &[u8],
     salt: &[u8],
@@ -1426,6 +1492,125 @@ mod tests {
             Err(KeystoreError::Decrypt) => {}
             other => panic!("expected Decrypt error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn change_password_reencrypts_the_same_seed() {
+        let dir = tempdir().unwrap();
+        let ks = Keystore::open(dir.path());
+        let seed = fixed_seed();
+        ks.write_identity("alice", &seed, "old", SeedOrigin::Random)
+            .unwrap();
+        let before: serde_json::Value =
+            serde_json::from_slice(&fs::read(ks.identity_path("alice")).unwrap()).unwrap();
+
+        ks.change_identity_password("alice", "old", "new").unwrap();
+
+        // The old password no longer decrypts; the new one yields the same seed
+        assert!(matches!(
+            ks.load_seed("alice", "old"),
+            Err(KeystoreError::Decrypt)
+        ));
+        assert_eq!(ks.load_seed("alice", "new").unwrap().as_ref(), &seed);
+
+        // Fresh randomness on rewrap; public material and metadata unchanged
+        let after: serde_json::Value =
+            serde_json::from_slice(&fs::read(ks.identity_path("alice")).unwrap()).unwrap();
+        assert_ne!(before["kdf"]["salt"], after["kdf"]["salt"]);
+        assert_ne!(before["cipher"]["nonce"], after["cipher"]["nonce"]);
+        assert_eq!(before["pubkeys"], after["pubkeys"]);
+        assert_eq!(before["version"], after["version"]);
+        assert_eq!(before["origin"], after["origin"]);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(ks.identity_path("alice"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
+
+    #[test]
+    fn change_password_never_weakens_stored_kdf_params() {
+        let dir = tempdir().unwrap();
+        let ks = Keystore::open(dir.path());
+        let seed = fixed_seed();
+        ks.write_identity("dave", &seed, "old", SeedOrigin::Random)
+            .unwrap();
+
+        // Rewrap the record on disk with a t_cost above this build's default,
+        // as a newer build with bumped defaults would have written it.
+        let (rec, _) = encrypt_identity_record(
+            &seed,
+            "old",
+            SeedOrigin::Random,
+            ARGON2_M_COST,
+            ARGON2_T_COST + 2,
+            ARGON2_P_COST,
+        )
+        .unwrap();
+        write_atomic_secure(
+            &ks.identity_path("dave"),
+            &serde_json::to_vec_pretty(&rec).unwrap(),
+        )
+        .unwrap();
+
+        ks.change_identity_password("dave", "old", "new").unwrap();
+
+        // The stronger stored cost survives the rewrap (max, not overwrite)
+        let after: serde_json::Value =
+            serde_json::from_slice(&fs::read(ks.identity_path("dave")).unwrap()).unwrap();
+        assert_eq!(after["kdf"]["t_cost"], serde_json::json!(ARGON2_T_COST + 2));
+        assert_eq!(after["kdf"]["m_cost"], serde_json::json!(ARGON2_M_COST));
+        assert_eq!(ks.load_seed("dave", "new").unwrap().as_ref(), &seed);
+    }
+
+    #[test]
+    fn change_password_preserves_a_mnemonic_origin() {
+        let dir = tempdir().unwrap();
+        let ks = Keystore::open(dir.path());
+        let seed = fixed_seed();
+        ks.write_identity("mnem", &seed, "old", SeedOrigin::Mnemonic)
+            .unwrap();
+
+        ks.change_identity_password("mnem", "old", "new").unwrap();
+
+        // Origin survives the rewrap, and (since it is bound into the AAD) a
+        // successful decrypt under the new password proves it was re-bound
+        // correctly.
+        assert_eq!(ks.identity_origin("mnem").unwrap(), SeedOrigin::Mnemonic);
+        assert_eq!(ks.load_seed("mnem", "new").unwrap().as_ref(), &seed);
+    }
+
+    #[test]
+    fn change_password_with_wrong_old_password_leaves_the_file_untouched() {
+        let dir = tempdir().unwrap();
+        let ks = Keystore::open(dir.path());
+        ks.write_identity("carol", &fixed_seed(), "right", SeedOrigin::Random)
+            .unwrap();
+        let before = fs::read(ks.identity_path("carol")).unwrap();
+
+        assert!(matches!(
+            ks.change_identity_password("carol", "wrong", "new"),
+            Err(KeystoreError::Decrypt)
+        ));
+
+        assert_eq!(fs::read(ks.identity_path("carol")).unwrap(), before);
+        ks.load_seed("carol", "right").unwrap();
+    }
+
+    #[test]
+    fn change_password_for_a_missing_identity_is_not_found() {
+        let dir = tempdir().unwrap();
+        let ks = Keystore::open(dir.path());
+        assert!(matches!(
+            ks.change_identity_password("ghost", "a", "b"),
+            Err(KeystoreError::NotFound(_))
+        ));
     }
 
     #[test]
@@ -1687,7 +1872,7 @@ mod tests {
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         // Swap in the other identity's DH pair *whole*. Both halves are valid
         // and mutually consistent, so the record parses and the substitution
-        // must be caught by the AAD binding rather than by pair validation —
+        // must be caught by the AAD binding rather than by pair validation,
         // which is the property under test.
         record["pubkeys"]["dh_g1"] =
             serde_json::Value::String(hex::encode(other.dh.g1.to_compressed()));

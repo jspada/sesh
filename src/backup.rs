@@ -463,7 +463,7 @@ fn derive_key(password: &[u8], salt: &[u8]) -> Result<Zeroizing<[u8; AEAD_KEY_LE
     derive_key_with(password, salt, ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST)
 }
 
-/// Derive the AEAD key with explicit Argon2id parameters (the restore path —
+/// Derive the AEAD key with explicit Argon2id parameters (the restore path
 /// honors what the bundle was written with; bounds-checked by the caller).
 fn derive_key_with(
     password: &[u8],
