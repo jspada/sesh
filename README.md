@@ -4,14 +4,14 @@
   <img src="screenshot.png" alt="sesh in action" width="700">
 </p>
 
-Sesh is a **keysafe**: it derives and manages passwords and PINs like a
+*Sesh is a **keysafe**: it derives and manages passwords and PINs like a
 password safe, but also cryptographic keys and BIP39 mnemonics, all from
-a single master secret, for one user or shared between 2–3 users.
+a single master secret, for one user or shared between 2–3 users.*
 
-It allows distributed users to create and maintain a shared, replicated
-keysafe without ever transmitting secret information. Its multi-user
-keysafes works by establishing **2- and 3-party shared secrets** over an
-insecure channel using **BLS12-381**, backed by an **encrypted local keystore**.
+Small teams of users can create and maintain shared, replicated keysafes
+without ever transmitting secret information. It works by establishing
+**2- and 3-party shared secrets** over an insecure channel using
+**BLS12-381**, backed by an **encrypted local keystore**.
 
 There is only one master secret stored per keysafe. Everything else
 (secretes, shared-secrets and passwords) is hierarchically and
