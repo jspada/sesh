@@ -2872,8 +2872,9 @@ fn registry_share_reshares_stored_entry() {
     run_pw(a, &["hd-secret", "create", "grp", "wifi"]);
     let secret = hd_secret_of(a, "grp", "wifi");
     let shared = run_pw(a, &["hd-secret", "share", "grp", "wifi"]);
-    // Fingerprint + share token only, never the secret
-    assert_eq!(shared.lines().count(), 2);
+    // The group-update card: header, fingerprint and share token, never the secret
+    assert_eq!(shared.lines().count(), 3);
+    assert!(shared.starts_with("Sesh Group Update\n"));
     assert!(!field(&shared, "Share token").is_empty());
     assert!(!shared.contains(&secret));
     // The fingerprint matches show's, and the shared token round-trips
@@ -2895,6 +2896,47 @@ fn registry_share_reshares_stored_entry() {
         .assert()
         .failure()
         .stderr(contains("local-only"));
+}
+
+/// Every change to a group-owned definition ends in the same card, so a member
+/// learns one shape: what the group must apply, and what they should end up
+/// agreeing on once they have. A removal names the entry it retired, not the
+/// tombstone that replaced it.
+#[test]
+fn group_changes_end_in_a_group_update_card() {
+    let homes = wire_group(&["a", "b"]);
+    let (a, b) = (homes[0].path(), homes[1].path());
+    form_group(a, b, "grp");
+
+    // The card's fingerprint is the one the details block just showed
+    let created = run_pw(a, &["hd-secret", "create", "grp", "vpn", "ops"]);
+    let card = created.split("Sesh Group Update\n").nth(1).expect(&created);
+    assert_eq!(field(&created, "Fingerprint"), field(card, "Fingerprint"));
+    assert!(!field(card, "Share token").is_empty());
+
+    // A rotation's card carries the new epoch's fingerprint, not the old one
+    let rotated = run_pw(a, &["hd-secret", "rotate", "grp", "vpn", "ops"]);
+    let rot_card = rotated.split("Sesh Group Update\n").nth(1).expect(&rotated);
+    assert_eq!(field(&rotated, "Fingerprint"), field(rot_card, "Fingerprint"));
+    assert_ne!(field(&created, "Fingerprint"), field(rot_card, "Fingerprint"));
+
+    // A removal's card leads with the entry it retired (the live epoch-2 recipe
+    // a member still sees in their own `list`, fingerprint and all) not the
+    // tombstone that replaced it, which derives nothing. The tombstone's epoch
+    // is named too: it is what the token carries and what `apply` will report.
+    let removed = run_pw(a, &["hd-secret", "remove", "grp", "vpn", "ops"]);
+    let rem_card = removed.split("Sesh Group Update\n").nth(1).expect(&removed);
+    assert_eq!(field(rem_card, "Removed"), "epoch 2 (tombstone at epoch 3)");
+    assert_eq!(
+        field(rem_card, "Fingerprint"),
+        field(rot_card, "Fingerprint")
+    );
+    let applied = apply_ok(b, &field(rem_card, "Share token"), "y\n");
+    assert!(applied.contains("Applied REMOVE"), "{applied}");
+
+    // A personal definition is local-only: there is nothing to hand to a group
+    let personal = run_pw(a, &["hd-secret", "create", "me", "vpn"]);
+    assert!(!personal.contains("Sesh Group Update"), "{personal}");
 }
 
 #[test]
@@ -5311,3 +5353,5 @@ fn an_imported_archive_never_rewrites_local_recovery_history() {
         "epoch 2 was rewritten"
     );
 }
+
+

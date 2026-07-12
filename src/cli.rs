@@ -2351,20 +2351,55 @@ fn group_member_identities(
     Ok(ids)
 }
 
-/// Sign and print the share token broadcasting a group-scope definition change.
-/// Personal (keypair-owned) definitions are local-only, so callers pass a
-/// group state only when there is one.
-fn print_share_token(
+/// Print the **Sesh Group Update** card: the block a member hands to the rest of
+/// the group after changing a group-owned definition. `create`, `rotate`,
+/// `remove` and `share` all end in this same card, so a reader learns one shape:
+/// the change itself (the share token peers feed to `hd-secret apply`) and the
+/// value they check their own registry against once they have.
+///
+/// A live definition is named by its fingerprint, which is exactly what two
+/// members compare to confirm they hold the same password, formatting and all.
+///
+/// A removal is named by `retired`: the entry **as it stood before the
+/// tombstone replaced it**. That is the epoch a member still sees in their own
+/// `list`, and the recipe whose fingerprint they can match there before they
+/// apply the removal, so it is what the card leads with. The tombstone's own
+/// epoch (one above it) is stated in the same breath, because it is the epoch
+/// the token carries and the one `apply` will report -- but it is a bookkeeping
+/// artifact of the merge rule, not a secret, and it is never fingerprinted:
+/// the tombstone derives nothing, and the params it carries are the retired
+/// entry's, so a digest over *it* would read as the fingerprint of a still-live
+/// secret for a deleted entry (`apply` declines to print one for the same
+/// reason).
+///
+/// Personal (keypair-owned) definitions are local-only, so callers reach this
+/// only when there is a group state.
+fn print_group_update(
     ks: &Keystore,
     state: &SharedSecretState,
     seed: &[u8; SEED_BYTES],
     action: ShareAction,
     def: &crate::registry::Definition,
+    master: &Scalar,
+    retired: Option<&crate::registry::Definition>,
 ) -> Result<(), String> {
-    println!(
-        "Share token: {}",
-        group_share_token(ks, state, seed, action, def)?
-    );
+    let mut kv: Vec<(&'static str, String)> = Vec::new();
+    if def.tombstone {
+        let prev = retired.ok_or("internal: a removal must name the entry it retired")?;
+        kv.push((
+            "Removed",
+            format!("epoch {} (tombstone at epoch {})", prev.epoch, def.epoch),
+        ));
+        kv.push(("Fingerprint", hd_fingerprint_of(master, prev)));
+    } else {
+        kv.push(("Fingerprint", hd_fingerprint_of(master, def)));
+    }
+    kv.push((
+        "Share token",
+        group_share_token(ks, state, seed, action, def)?,
+    ));
+    println!("Sesh Group Update");
+    print!("{}", render_kv(&kv));
     Ok(())
 }
 
@@ -2578,10 +2613,7 @@ fn cmd_hd_create(owner: &str, m: &ArgMatches) -> Result<(), String> {
         }
         (None, Some(state)) => {
             println!();
-            println!(
-                "Share token: {}",
-                group_share_token(&ks, state, &seed, ShareAction::New, &def)?
-            );
+            print_group_update(&ks, state, &seed, ShareAction::New, &def, &master, None)?;
         }
         _ => {}
     }
@@ -2986,10 +3018,7 @@ fn cmd_hd_rotate(owner: &str, m: &ArgMatches) -> Result<(), String> {
     }
     if let Some(state) = &rs.group_state {
         println!();
-        println!(
-            "Share token: {}",
-            group_share_token(&ks, state, &seed, ShareAction::Update, &def)?
-        );
+        print_group_update(&ks, state, &seed, ShareAction::Update, &def, &master, None)?;
     }
     Ok(())
 }
@@ -3004,11 +3033,28 @@ fn cmd_hd_remove(owner: &str, m: &ArgMatches) -> Result<(), String> {
 
     let (rs, seed) = unlock_owner(&ks, owner)?;
     let mut reg = ks.load_registry(&rs.scope, &seed).map_err(se)?;
+    // The entry as it stands, before the tombstone overwrites it: the card
+    // fingerprints *this* (the recipe the group is being asked to retire), which
+    // is the row a member matches against their own `list` before applying the
+    // removal. The tombstone that replaces it has no secret to fingerprint.
+    let retired = reg.get(id, user).cloned();
     let def = reg.remove(id, user).map_err(se)?.clone();
     ks.save_registry(&rs.scope, &seed, &reg).map_err(se)?;
     println!("Removed definition '{id}'.");
     if let Some(state) = &rs.group_state {
-        print_share_token(&ks, state, &seed, ShareAction::Remove, &def)?;
+        // `remove` succeeded, so it found a live entry to retire
+        let retired = retired.ok_or("internal: removed an entry that was not there")?;
+        let master = master_for(&ks, &rs, &seed)?;
+        println!();
+        print_group_update(
+            &ks,
+            state,
+            &seed,
+            ShareAction::Remove,
+            &def,
+            &master,
+            Some(&retired),
+        )?;
     }
     Ok(())
 }
@@ -3341,16 +3387,7 @@ fn cmd_hd_share(owner: &str, m: &ArgMatches) -> Result<(), String> {
     // Fingerprint + share token only-- no secret (the token carries just the
     // recipe; the fingerprint lets the recipient confirm agreement, params and
     // all, since the recipe half covers the formatting the token ships).
-    print!(
-        "{}",
-        render_kv(&[
-            ("Fingerprint", hd_fingerprint_of(&master, &def)),
-            (
-                "Share token",
-                group_share_token(&ks, state, &seed, ShareAction::New, &def)?,
-            ),
-        ])
-    );
+    print_group_update(&ks, state, &seed, ShareAction::New, &def, &master, None)?;
     Ok(())
 }
 
