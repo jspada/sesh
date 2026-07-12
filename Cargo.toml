@@ -44,6 +44,17 @@ sha3 = "0.10"
 aes-gcm = "0.10"
 argon2 = "0.5"
 
+# TOTP (--mode otp). RFC 6238's default (and universally implemented) MAC is
+# HMAC-SHA-1: sha1 is RFC-mandated here and used only inside HMAC, where
+# collision attacks do not apply (see src/totp.rs). Same RustCrypto family as
+# sha3/aes-gcm above.
+hmac = "0.12"
+sha1 = "0.10"
+
+# QR rendering for the `reveal --setup` enrollment view (Nayuki's qrcodegen:
+# pure Rust, zero transitive dependencies).
+qrcodegen = "1.8"
+
 # Secret hygiene.
 rpassword = "7"
 zeroize = { version = "1", features = ["derive"] }

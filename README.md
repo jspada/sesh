@@ -4,9 +4,10 @@
   <img src="screenshot.png" alt="sesh in action" width="700">
 </p>
 
-*Sesh is a **keysafe**: it derives and manages passwords and PINs like a
-password safe, but also cryptographic keys and BIP39 mnemonics, all from
-a single master secret, for one user or shared between 2–3 users.*
+*Sesh is a **keysafe**: it manages everything a password safe does (passwords,
+PINs, cryptographic keys, BIP39 mnemonics, authenticator (2FA) secrets), but
+it derives them on demand from a single master secret instead of storing them,
+for yourself or shared by a team.*
 
 Small teams of users can create and maintain shared, replicated keysafes
 without ever transmitting secret information. It works by establishing
@@ -148,6 +149,11 @@ writing secrets to the internal disk at that mount point. Provision such a store
 once with `sesh --keystore <path> keypair create <name>` (with the device
 mounted), then point `config.toml` at it.
 
+The same file holds the user's settings ([`config.toml.example`](config.toml.example)
+documents every key it accepts). It is optional, per-machine, and holds no
+secret; an unknown key in it is an error, not a preference that silently never
+applies.
+
 ### Tab completion
 
 Sesh ships with dynamic shell completion: the completions are computed live by the
@@ -197,8 +203,8 @@ leave sesh, and only through two supervised commands:
   window (TTY only; see *Names, clipboard, cascades*).
 
 A stored group's master `K` and every identity seed have **no** output command
-at all. `--mode` appears exactly on the commands that output a secret, as a
-display-only override of the stored encoding.
+at all. `--mode` appears on `create` and `rotate`, the commands that set a
+definition's recipe.
 
 ### 1. Each party creates an identity and shares its contact token
 
@@ -294,20 +300,25 @@ keypair, and every secret is re-derived on demand.
 
 ```console
 $ sesh hd-secret create alice google.com bob@google.com
-$ sesh hd-secret list alice                       # Shows table of public info, never secrets
-$ sesh hd-secret show alice google.com            # Show's entry details + fingerprint (only public info)
-$ sesh hd-secret copy alice google.com            # Copy a secret -> clipboard, never echoed
-                                                  #   then a live countdown zeros it.
-$ sesh hd-secret reveal alice google.com          # Show a secret on screen, timed window (TTY only)
-                                                  #   then a live countdown zeros it.
-$ sesh hd-secret copy alice google.com --mode hex # Display-only re-encoding
-$ sesh hd-secret rotate alice google.com          # Secret rotation: bump epoch -> new secret
-$ sesh hd-secret remove alice google.com          # Remove a secret (epoch-versioned tombstone)
+$ sesh hd-secret list alice                         # Shows table of public info, never secrets
+$ sesh hd-secret show alice google.com              # Show's entry details + fingerprint (only public info)
+$ sesh hd-secret copy alice google.com              # Copy a secret -> clipboard, never echoed
+                                                    #   then a live countdown zeros it.
+$ sesh hd-secret reveal alice google.com            # Show a secret on screen, timed window (TTY only)
+                                                    #   then a live countdown zeros it.
+$ sesh hd-secret rotate alice google.com --mode hex # Re-shape it (new epoch -> new secret)
+$ sesh hd-secret rotate alice google.com            # Secret rotation: bump epoch -> new secret
+$ sesh hd-secret remove alice google.com            # Remove a secret (epoch-versioned tombstone)
 ```
 
-The `--mode` (`hex`/`b58`/`b10`/`alpha`/`bip39`), `--length`, `--symbols`, and
-`--suffix` format the output only.  They never enter the derivation, so agreeing
-on `(id, user, epoch)` and params reproduces the same string anywhere.
+A definition renders exactly one way: the way its stored params say.  Thus, a
+fingerprint attests the exact string `copy` will produce and not merely the
+child behind it. Re-shaping one is a `rotate` with new params, which advances the
+epoch, so the secret changes with the shape.
+
+The `--mode` (`hex`/`b58`/`b10`/`alpha`/`bip39`/`otp`), `--length`, `--symbols`,
+and `--suffix` format the output only.  They never enter the derivation, so
+agreeing on `(id, user, epoch)` and params reproduces the same string anywhere.
 
 A bare `create` defaults to `--mode b58 --length 14 --symbols`: a short,
 memorable, symbol-bearing password. The defaults are **resolved once and stored**
@@ -334,12 +345,14 @@ can never alter an existing password. The `--length` and `--symbols`
 defaults are per-mode: `hex` and `b58` get `--length 14 --symbols`, while
 `b10` is a numeric code, so a bare `--mode b10` resolves `--length 6
 --no-symbols` (a PIN, pass `--length`/`--symbols` explicitly for more);
-under `--mode alpha` or `--mode bip39` neither is filled in, so you get the full
-case-code or the full 24-word mnemonic. Use `--no-symbols` to opt out of the
-symbol set. Rotating an existing definition into a mode that cannot render a
-carried-over param (`--mode alpha` with a symbol set, `--mode bip39` with a
-length or suffix) simply drops it, naming each drop on stder. Asking for both
-at once (`--mode alpha --symbols`) is still an error.
+under `--mode alpha`, `--mode bip39`, or `--mode otp` neither is filled in, so
+you get the full case-code, the full 24-word mnemonic, or the full TOTP secret
+(see [§5](#5-team-totp-shared-two-factor-codes---mode-otp)). Use `--no-symbols`
+to opt out of the symbol set. Rotating an existing definition into a mode that
+cannot render a carried-over param (`--mode alpha` with a symbol set, `--mode
+bip39` or `--mode otp` with a length or suffix) simply drops it, naming each
+drop on stder. Asking for both at once (`--mode alpha --symbols`) is still an
+error.
 The `--symbols` option extends the alphabet with extra characters (positional
 modes `hex`/`b10`/`b58` only), so they are distributed uniformly through the
 password rather than clumped at the end.  In particular, the placement is driven
@@ -389,6 +402,64 @@ conflict (concurrent edits) shows **both** versions (params and fingerprints)
 and asks *keep mine / use incoming / abort*. A removal is a tombstone, so a stale
 `create` cannot resurrect it. Tokens are rejected for any other group (context-bound)
 and for any non-member signer.
+
+### 5. Team TOTP: shared two-factor codes (`--mode otp`)
+
+`--mode otp` turns an hd-secret into a standard **TOTP** authenticator secret
+(RFC 6238: the 6-digit codes every authenticator app produces). `reveal` shows
+the live rolling code, `copy` puts the current code on the clipboard, and
+`--setup` gives the one-time enrollment view: the Base32 secret, the
+`otpauth://` URI, and a scannable QR code.
+
+Prefer `reveal --setup` (scan the QR) over `copy --setup`: a code is stale in 30
+seconds, but the enrollment URI is the seed itself, a long-term secret, and
+clipboard-history tools may keep a copy of it after sesh has zeroed the
+clipboard.
+
+Motivating example: three admins share root access to a server whose SSH logins
+are 2FA-gated by PAM. Normally that means generating a TOTP seed and passing it
+around, i.e. via a screenshot of a QR code or a shared vault-- a dangerous and
+error-prone process! With a group-owned otp secret, no teammate ever handles the
+seed. Only the server being enrolled sees it:
+
+```console
+$ sesh hd-secret create ourteam ssh-root --mode otp   # any member: peers sync via the share token
+$ sesh hd-secret reveal ourteam ssh-root --setup      # one member: enrolls the server (Base32/QR)
+$ sesh hd-secret apply ourteam                        # every member: inputs share token
+$ sesh hd-secret copy ourteam ssh-root                # every member: current code -> clipboard
+```
+
+For a team this composes into something no authenticator app offers:
+
+- **The secret is never shared among members.** Each derives the identical
+  TOTP seed independently from the group secret; enrollment hands it only to
+  the verifier you're protecting, never to a teammate.
+- **Everyone is always current.** Same derivation, same clock, same code, on
+  every member's machine, forever, with nothing to distribute or refresh.
+- **Rotation shares no secrets either.** `rotate` bumps the epoch; the share
+  token carries only the recipe, and each member re-derives the new seed.
+- **Backup is automatic.** Codes re-derive from the master (or your 24-word
+  mnemonic), so there are no authenticator backup files and no cloud sync to
+  trust.
+
+The catch is inherent to TOTP: third-party sites (GitHub, Google, ...) generate
+the seed on their side and won't accept yours. Derived otp secrets are for
+**verifiers you control**, i.e. anything that accepts a supplied seed,
+including:
+
+- PAM `google-authenticator` (SSH/sudo 2FA: the Base32 secret is the first line
+  of `~/.google_authenticator`)
+- HashiCorp Vault's TOTP secrets engine (`generate=false` takes the `otpauth://`
+  URI verbatim)
+- FreeIPA (`ipa otptoken-add --ipatokenotpkey=<base32>`)
+- privacyIDEA / LinOTP and similar enterprise OTP servers (seed-import
+  enrollment)
+- self-written services via any RFC 6238 library
+
+ The same `--setup` view can also be used to load the seed into an ordinary
+ authenticator app or hardware key (scan the QR, or `ykman oath accounts uri`
+ for a YubiKey), so your phone shows the same codes sesh does. It is a convenience
+ copy, not a backup: it re-derives from the master like everything else.
 
 ## Two kinds of backup
 
@@ -503,6 +574,23 @@ computed on the fly at display time; no registry or share token stores one.
   switch apps and paste, then overwrites (zeros) the clipboard. **Any key**
   zeros immediately; both exit cleanly. Piped (non-interactive) `copy` skips the
   countdown.
+- **Clear-on-paste (Linux).** X11 and Wayland clipboards are *request-served*:
+  the copying process stays alive and hands the secret to each application that
+  pastes, so it can count pastes and drop the selection after a budget of them.
+  Set one in `~/.config/sesh/config.toml` (see [`config.toml.example`](config.toml.example)):
+
+  ```toml
+  linux_paste_count = 1
+  ```
+
+  The countdown still runs and still zeros on timeout or a keypress; the budget
+  only lets the clipboard clear **earlier**, the moment you have pasted. Two
+  caveats, both inherent to the mechanism: Wayland's `wl-copy` serves at most one
+  paste (so only `1` works there; X11's `xclip` takes any count), and a clipboard
+  *manager* that snapshots every selection consumes pastes exactly as an app
+  does, so on such a desktop the budget can be spent before you paste at all.
+  macOS has no equivalent, because `NSPasteboard` never reports a read; the
+  setting is ignored there and the timed zeroing is what you get.
 - **On-screen reveal.** `hd-secret reveal ...` shows the secret on the
   **alternate screen buffer** (no scrollback, vanishes on exit) with a
   countdown below it (`--timeout`, default 60s; **any key** clears immediately),

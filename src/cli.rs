@@ -28,9 +28,15 @@ use crate::protocol::{
 };
 use crate::table::{render_kv, Table};
 use crate::terminal;
+use crate::totp;
 use crate::wizard::{self, GroupPlan, StdioTerminal};
 
 const MAX_SUFFIX_LEN: usize = 8;
+
+/// Longest `id` or `user` a definition may carry, in bytes. See
+/// [`validate_hd_strings`]: room for any real site name or account, and still
+/// inside what the `otpauth://` URI of an otp definition can encode as a QR.
+const MAX_HD_STRING_LEN: usize = 256;
 
 /// The output mode a new definition gets when `--mode` is not given
 const DEFAULT_MODE: &str = "b58";
@@ -50,8 +56,9 @@ const DEFAULT_B10_LENGTH: u64 = 6;
 /// alphabet extended with symbols. `b10` is the deliberate exception. A bare
 /// `--mode b10` means a numeric code (a PIN), so it resolves `--length 6
 /// --no-symbols` rather than mixing punctuation into digits. The modes that
-/// take no symbol set (`alpha`, `bip39`) get neither half, rather than
-/// silently trimming a mnemonic or a case-code to 14 characters. Passing
+/// take no symbol set (`alpha`, `bip39`, `otp`) get neither half, rather than
+/// silently trimming a mnemonic, a case-code, or a TOTP secret export (`otp`
+/// is a fixed 32-character shape that could not carry them anyway). Passing
 /// `--length` or `--symbols` explicitly still wins wherever it is valid.
 fn mode_defaults(mode: &str) -> (Option<u64>, Option<&'static str>) {
     match mode {
@@ -98,9 +105,9 @@ fn owner_completer() -> ArgValueCandidates {
 
 /// Build the top-level clap command tree
 pub fn build_cli() -> Command {
-    // `--mode` appears exactly on commands that output a secret. Without a
-    // default it is a display-only override of stored params (hd copy/reveal,
-    // rotate merge); with the default it is the stored param (create).
+    // `--mode` appears on the commands that **set** a definition's recipe:
+    // `create` (with the default) and `rotate` (without one, so an absent flag
+    // inherits the stored mode rather than re-applying the default).
     let mode_arg = || {
         Arg::new("mode")
             .short('m')
@@ -386,16 +393,22 @@ pub fn build_cli() -> Command {
                              The --length and --symbols defaults apply only to the modes that \
                              take a symbol set, and per mode: hex and b58 get `--length 14 \
                              --symbols`; b10 is a numeric code, so it gets `--length 6 \
-                             --no-symbols` (a PIN). Under --mode alpha or --mode \
-                             bip39 neither is filled in, so the full mnemonic or case-code is \
-                             produced. Pass --no-symbols to opt out of the symbol set, or \
-                             --length explicitly to override the trim.\n\n\
+                             --no-symbols` (a PIN). Under --mode alpha, bip39, or otp \
+                             neither is filled in, so the full mnemonic, case-code, or TOTP \
+                             secret is produced. Pass --no-symbols to opt out of the symbol \
+                             set, or --length explicitly to override the trim.\n\n\
+                             --mode otp makes the definition a standard TOTP authenticator \
+                             secret (RFC 6238): `copy` and `reveal` egress the live 6-digit \
+                             code, and their --setup flag gives the one-time enrollment view \
+                             (Base32 secret, otpauth:// URI, QR code).\n\n\
                              `rotate --mode <m>` drops any stored param the new mode cannot \
-                             render (a symbol set under alpha, a length or suffix under bip39), \
-                             naming each one as it goes.\n\n\
+                             render (a symbol set under alpha, a length or suffix under bip39 \
+                             or otp), naming each one as it goes.\n\n\
                              --recover <EPOCH> is the disaster escape hatch: it overwrites the \
-                             entry (either live or removed) at exactly that epoch, inheriting the \
-                             recipe recorded for it (see `list --archived`). It is the one \
+                             entry (either live or removed) at exactly that epoch, with the recipe \
+                             recorded for it (see `list --archived`). The recipe is read, never \
+                             typed, so --recover takes no formatting flags: every member who \
+                             recovers an epoch lands on the same password. It is the one \
                              command that breaks epoch monotonicity, it asks before it writes, \
                              and it emits no share token, because a token below the other \
                              members' epoch is classified stale and silently ignored. Every \
@@ -422,6 +435,10 @@ pub fn build_cli() -> Command {
                         .about("Derive one stored secret and copy it to the clipboard")
                         .long_about(
                             "Derive one stored secret and copy it to the clipboard.\n\n\
+                             For an otp-mode definition the clipboard gets the current 6-digit \
+                             TOTP code (re-copied automatically if the 30s window rolls over \
+                             during the countdown); --setup copies the otpauth:// enrollment \
+                             URI instead.\n\n\
                              --recover <EPOCH> re-derives a *past* password: the secret at that \
                              epoch, formatted by the recipe that was current then, read from the \
                              archive `rotate` and `remove` write to. Nothing is written and no \
@@ -433,7 +450,9 @@ pub fn build_cli() -> Command {
                              to compare against.",
                         )
                         .arg_required_else_help(true)
-                        .arg(owner_arg()).arg(id_arg()).arg(user_arg()).arg(mode_arg()).arg(recover_arg())
+                        .arg(owner_arg()).arg(id_arg()).arg(user_arg()).arg(recover_arg())
+                        .arg(Arg::new("setup").long("setup").action(ArgAction::SetTrue)
+                            .help("Copy the otpauth:// enrollment URI instead of the current code (otp mode only)"))
                         .arg(Arg::new("timeout").short('t').long("timeout")
                             .default_value("30")
                             .help("Seconds before the clipboard is zeroed (any key zeros early)")),
@@ -457,8 +476,18 @@ pub fn build_cli() -> Command {
                 .subcommand(
                     Command::new("reveal")
                         .about("Show a stored secret on screen in a supervised, timed window (TTY only)")
+                        .long_about(
+                            "Show a stored secret on screen in a supervised, timed window \
+                             (TTY only).\n\n\
+                             For an otp-mode definition the window shows the live rolling \
+                             6-digit TOTP code, recomputed as each 30s window rolls over; \
+                             --setup shows the one-time enrollment view instead: the Base32 \
+                             secret, the otpauth:// URI, and a scannable QR code.",
+                        )
                         .arg_required_else_help(true)
-                        .arg(owner_arg()).arg(id_arg()).arg(user_arg()).arg(mode_arg()).arg(recover_arg())
+                        .arg(owner_arg()).arg(id_arg()).arg(user_arg()).arg(recover_arg())
+                        .arg(Arg::new("setup").long("setup").action(ArgAction::SetTrue)
+                            .help("Show the one-time enrollment view: Base32 secret, otpauth:// URI, QR code (otp mode only)"))
                         .arg(Arg::new("timeout").short('t').long("timeout")
                             .default_value("60")
                             .help("Seconds the secret stays on screen (any key clears early)")),
@@ -2230,9 +2259,10 @@ fn hd_child_of(master: &Scalar, def: &crate::registry::Definition) -> Scalar {
 /// over the child `(master, id, user, epoch)` derives, the recipe half over that
 /// child *and* the params that format it.
 ///
-/// Always taken over the definition's **stored** params, never a display-only
-/// `--mode` override. The fingerprint describes the recipe on record, which is
-/// the thing two members compare. Nothing that takes `--mode` prints one.
+/// Taken over the definition's **stored** params, which are also the params it
+/// renders under, so the fingerprint attests exactly the string `copy`/`reveal`
+/// will produce: two members whose fingerprints agree hold the same password,
+/// character for character, and not merely the same underlying child.
 fn hd_fingerprint_of(master: &Scalar, def: &crate::registry::Definition) -> String {
     crypto::hd_fingerprint(&def.params.canonical_bytes(), &hd_child_of(master, def))
 }
@@ -2246,10 +2276,15 @@ fn hd_fingerprint_of(master: &Scalar, def: &crate::registry::Definition) -> Stri
 ///
 /// A definition whose params no longer render (a hand-edited registry, say) is
 /// simply left unannotated rather than allowed to break the display.
+///
+/// otp-mode definitions are also left unannotated: "(32 chars)" would describe
+/// the Base32 export, not the 6-digit code the user actually sees, so it
+/// misleads - and the mode name already says everything about the shape.
 fn describe_params(master: &Scalar, def: &crate::registry::Definition) -> String {
     let rendered = match def.params.length {
         Some(_) => None, // an explicit trim already says the length exactly
-        None => registry_secret(master, def, None)
+        None if def.params.mode == "otp" => None,
+        None => registry_secret(master, def)
             .ok()
             .map(|s| Zeroizing::new(s).chars().count()),
     };
@@ -2278,38 +2313,21 @@ fn def_details(
     kv
 }
 
-/// Derive and format the secret for a stored definition. `mode_override` is
-/// **display-only**-- the stored params are never touched; the bip39 ×
-/// length/suffix incompatibility and the symbol set are re-checked against the
-/// merged view.
+/// Derive and format the secret for a stored definition, the one way its stored
+/// params say.
 ///
-/// The set must be re-checked because `--mode` bypasses the stored, already
-/// validated params: a set of `'a'` is legal under `b10` and collides under
-/// `hex`. This is a better error message, not a safety net-- `format`'s gate
-/// inside `render_body` is the safety net.
+/// **Egress is single-valued, and that is a security property.** Rendering one
+/// child under a caller-chosen mode would hand back the entropy a lossy recipe
+/// (a trimmed, symbol-mixed password) deliberately withholds: a password's
+/// child rendered as `otp` would mint TOTP codes anyone holding that password
+/// could compute. It is also what lets a fingerprint attest the exact string a
+/// member will copy, not just the child behind it. Re-shaping is `rotate`,
+/// which advances the epoch.
 fn registry_secret(
     master: &Scalar,
     def: &crate::registry::Definition,
-    mode_override: Option<&str>,
 ) -> Result<String, String> {
-    let mut params = def.params.clone();
-    if let Some(mode) = mode_override {
-        params.mode = mode.to_string();
-        if params.mode == "bip39" && (params.length.is_some() || params.suffix.is_some()) {
-            return Err("--length and --suffix are not compatible with bip39 output".into());
-        }
-        if let Some(set) = &params.symbols {
-            if !format::supports_symbols(&params.mode) {
-                return Err(format!(
-                    "this definition uses --symbols, which needs mode hex, b10, or b58 \
-                     (not '{}') - drop the --mode override to view it",
-                    params.mode
-                ));
-            }
-            format::validate_symbol_set(&params.mode, set)
-                .map_err(|e| format!("{e} - drop the --mode override to view this definition"))?;
-        }
-    }
+    let params = &def.params;
     let child = hd_child_of(master, def);
     format::format_secret(
         &child.to_bytes_le(),
@@ -2397,10 +2415,14 @@ fn cmd_hd_list(owner: &str, m: &ArgMatches) -> Result<(), String> {
         println!("(archived recipes, superseded by `rotate` or `remove`)");
     }
     println!();
+    // The plain listing gets a Mode column - the bare mode name is what tells
+    // an otp entry (a code generator) from a password at a glance. The verbose
+    // listing already names the mode inside Params, so there it would only be
+    // a duplicate.
     let mut table = if verbose {
         Table::new(&["Id", "User", "Epoch", "Params", "Fingerprint"])
     } else {
-        Table::new(&["Id", "User", "Epoch", "Fingerprint"])
+        Table::new(&["Id", "User", "Epoch", "Mode", "Fingerprint"])
     };
     let rows = if archived {
         reg.archived_all()
@@ -2411,6 +2433,8 @@ fn cmd_hd_list(owner: &str, m: &ArgMatches) -> Result<(), String> {
         let mut row = vec![d.id.clone(), d.user.clone(), d.epoch.to_string()];
         if verbose {
             row.push(describe_params(&master, d));
+        } else {
+            row.push(d.params.mode.clone());
         }
         row.push(hd_fingerprint_of(&master, d));
         table.push(row);
@@ -2564,16 +2588,43 @@ fn cmd_hd_create(owner: &str, m: &ArgMatches) -> Result<(), String> {
     Ok(())
 }
 
-/// `create --recover <EPOCH>`: overwrite the entry at exactly `epoch`, live,
-/// inheriting the recipe recorded for that epoch.
+/// Refuse a formatting flag typed alongside `--recover`.
 ///
-/// The recipe is **read, never typed**. `recipe_at` refuses an epoch it has no
-/// record of, so a recovery cannot invent a recipe from memory. A mistyped
-/// recipe does now move the fingerprint's recipe half, but a fingerprint is
-/// only worth anything against one to compare it to and a member recovering an
-/// entry alone has none. Explicit formatting flags still override the inherited
-/// recipe, and are called out as such, since that is precisely how two members
-/// end up agreeing on the epoch and disagreeing on the password.
+/// A recovery reproduces a recorded recipe; a flag that changed it would make
+/// the recovered password depend on what the user typed, so two members
+/// recovering the same epoch could hold different passwords while agreeing on
+/// everything the tool shows them. `rotate` is where a shape changes.
+fn recovery_takes_no_formatting_flags(m: &ArgMatches) -> Result<(), String> {
+    let typed = [
+        ("--mode", explicit_mode(m).is_some()),
+        ("--length", m.get_one::<String>("length").is_some()),
+        ("--symbols", m.contains_id("symbols")),
+        ("--no-symbols", m.get_flag("no-symbols")),
+        ("--suffix", m.get_one::<String>("suffix").is_some()),
+    ];
+    let named: Vec<&str> = typed.iter().filter(|(_, on)| *on).map(|(f, _)| *f).collect();
+    if named.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "--recover restores the recipe as recorded at that epoch, so it cannot be \
+         combined with {}",
+        named.join(", ")
+    ))
+}
+
+/// `create --recover <EPOCH>`: overwrite the entry at exactly `epoch`, live,
+/// **exactly as it was recorded**.
+///
+/// The recipe is read, never typed: `recipe_at` refuses an epoch it has no
+/// record of, and [`recovery_takes_no_formatting_flags`] refuses to let the
+/// command line change what it found. So every member who recovers the same
+/// epoch lands on the same password, whatever they type, which is the whole
+/// point of a recovery that cannot be shared (a token at a past epoch is
+/// classified stale and ignored, so the members' registries can only converge
+/// if the command is deterministic from the archive alone). To change a
+/// definition's shape, `rotate` it: that advances the epoch, so it is a new
+/// secret and it *does* travel as a share token.
 ///
 /// Asks before it writes: this is destructive, and it is the one place the
 /// epoch-monotonicity rule bends.
@@ -2586,15 +2637,12 @@ fn recover_definition<T: wizard::Terminal>(
     m: &ArgMatches,
     rs: &RegScope,
 ) -> Result<crate::registry::Definition, String> {
-    let inherited = reg
+    recovery_takes_no_formatting_flags(m)?;
+    let params = reg
         .recipe_at(id, Some(user), epoch)
         .map_err(se)?
         .params
         .clone();
-    let (params, notes) = merge_params(m, inherited.clone())?;
-    for n in &notes {
-        eprintln!("{n}");
-    }
 
     let sel = if user.is_empty() {
         format!("'{id}'")
@@ -2609,15 +2657,6 @@ fn recover_definition<T: wizard::Terminal>(
         None => println!("    now:    (no entry)"),
     }
     println!("    after:  epoch {epoch}  {}", params.describe());
-    if params != inherited {
-        println!();
-        println!(
-            "Warning: formatting flags override the recorded recipe\n    {}\n\
-             A member who runs this command without the identical flags will hold a\n\
-             different password. Compare fingerprints before the dash to catch it.",
-            inherited.describe()
-        );
-    }
     if rs.group_state.is_some() {
         println!();
         println!(
@@ -2703,18 +2742,138 @@ fn cmd_hd_show(owner: &str, m: &ArgMatches) -> Result<(), String> {
     Ok(())
 }
 
+/// Enforce `--setup`'s mode gate, returning whether the flag was given.
+///
+/// The enrollment view (Base32 secret, otpauth URI, QR) exists only for an
+/// otp-mode definition; anything else has no TOTP secret to enroll. The error
+/// sends the user to a *separate* otp definition rather than to this one's
+/// child: a TOTP seed and the password guarding the same account must not be
+/// the same key material, or the second factor is computable from the first.
+fn check_setup_mode(def: &crate::registry::Definition, setup: bool) -> Result<bool, String> {
+    if !setup {
+        return Ok(false);
+    }
+    if def.params.mode == "otp" {
+        return Ok(true);
+    }
+    Err(format!(
+        "--setup shows the otp enrollment view, which needs an otp definition \
+         (this one's mode is '{}'). Create a separate `--mode otp` definition to \
+         enroll TOTP.",
+        def.params.mode
+    ))
+}
+
+/// The refresh closure an otp `copy` hands to the clipboard countdown: the
+/// fresh code exactly when the TOTP window has rolled since `start` (the
+/// instant of the initial copy) or since the last refresh, `None` otherwise,
+/// so the clipboard is rewritten once per rollover, not once per frame.
+///
+/// `now_fn` is injected (the countdown passes the wall clock) so the rollover
+/// logic is unit-testable against a scripted clock. A `None` from `now_fn`
+/// (unset system clock) skips the refresh rather than copying a wrong-window
+/// code.
+fn otp_refresher<'a>(
+    key: &'a Zeroizing<[u8; format::SCALAR_BYTES]>,
+    start: u64,
+    mut now_fn: impl FnMut() -> Option<u64> + 'a,
+) -> impl FnMut() -> Option<Zeroizing<String>> + 'a {
+    let mut window = start / totp::PERIOD;
+    move || {
+        let now = now_fn()?;
+        let w = now / totp::PERIOD;
+        if w == window {
+            return None;
+        }
+        window = w;
+        Some(Zeroizing::new(totp::code(totp::key(key), now)))
+    }
+}
+
+/// Whole seconds since the Unix epoch, the TOTP time base. A pre-1970 system
+/// clock is an error, not a silent code-of-the-wrong-window: any TOTP code we
+/// produced then would simply be rejected by the verifier.
+fn unix_now() -> Result<u64, String> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .map_err(|_| "system clock is set before the Unix epoch; TOTP needs a correct clock".into())
+}
+
 fn cmd_hd_copy(owner: &str, m: &ArgMatches) -> Result<(), String> {
+    use crate::clipboard::Sink;
+
     let ks = keystore()?;
     let (rs, seed) = unlock_owner(&ks, owner)?;
     let (def, superseded) = find_stored_def(&ks, &rs, &seed, m, parse_recover(m)?)?;
     let master = master_for(&ks, &rs, &seed)?;
+    let timeout = std::time::Duration::from_secs(parse_timeout(m)?);
+
+    // The clipboard this copy writes through. With a Linux paste budget it also
+    // releases the secret once it has been pasted that many times, which ends
+    // the countdown early.
+    let settings = config::settings()?;
+    let mut clip = match clipboard::paste_budget(&settings) {
+        Some(n) => clipboard::System::with_paste_budget(n),
+        None => clipboard::System::new(),
+    };
+
+    // otp mode: the default egress is the live 6-digit code (what a login
+    // prompt wants), never the underlying secret; the Base32 secret and URI
+    // move only through the explicit --setup enrollment view.
+    let setup = check_setup_mode(&def, m.get_flag("setup"))?;
+    if setup {
+        // One-time enrollment egress: the full otpauth URI (it carries the
+        // secret, so it gets the same zeroized handling and countdown).
+        let b32 = Zeroizing::new(registry_secret(&master, &def)?);
+        let uri = format::otpauth_uri(&def.id, &def.user, &b32);
+        clip.copy(&uri)?;
+        if superseded {
+            print_recovery_note(&def);
+        }
+        if clipboard::interactive() {
+            clipboard::hold_then_clear(&mut clip, timeout)?;
+        } else {
+            println!(
+                "Copied the otpauth enrollment URI for '{}' (epoch {}) to the clipboard.",
+                def.id, def.epoch
+            );
+        }
+        return Ok(());
+    }
+    if def.params.mode == "otp" {
+        let key = Zeroizing::new(hd_child_of(&master, &def).to_bytes_le());
+        let now = unix_now()?;
+        let code = Zeroizing::new(totp::code(totp::key(&key), now));
+        clip.copy(&code)?;
+        if superseded {
+            print_recovery_note(&def);
+        }
+        if clipboard::interactive() {
+            // The countdown re-copies the fresh code whenever the 30s window
+            // rolls over, so the clipboard never holds a dead code mid-window
+            clipboard::hold_then_clear_refreshing(
+                &mut clip,
+                timeout,
+                otp_refresher(&key, now, || unix_now().ok()),
+            )?;
+        } else {
+            // A script owns clipboard hygiene here; tell it how long the code
+            // it just took is even worth pasting.
+            println!(
+                "Copied HD secret '{}' (epoch {}) to the clipboard \
+                 (current code, expires in {}s).",
+                def.id,
+                def.epoch,
+                totp::secs_left_in_window(now)
+            );
+        }
+        return Ok(());
+    }
+
     // Hold the secret in a zeroizing buffer: it is scrubbed the moment it drops
-    let secret = Zeroizing::new(registry_secret(
-        &master,
-        &def,
-        m.get_one::<String>("mode").map(String::as_str),
-    )?);
-    clipboard::copy_to_clipboard(secret.as_str())?;
+    let secret = Zeroizing::new(registry_secret(&master, &def)?);
+    clip.copy(secret.as_str())?;
 
     // Name the recipe a recovery used, before the countdown takes the screen.
     // The recipe is what a reader checks the recovered password against: the
@@ -2724,12 +2883,11 @@ fn cmd_hd_copy(owner: &str, m: &ArgMatches) -> Result<(), String> {
         print_recovery_note(&def);
     }
 
-    let timeout = std::time::Duration::from_secs(parse_timeout(m)?);
     if clipboard::interactive() {
         // Live countdown on stderr; the clipboard is zeroed on timeout or any key
-        clipboard::hold_then_clear(timeout)?;
+        clipboard::hold_then_clear(&mut clip, timeout)?;
     } else {
-        // No terminal to animate or read a keypress from - copy and report only. A
+        // No terminal to animate or read a keypress from so copy and report only. A
         // script owns clipboard hygiene here.
         println!(
             "Copied HD secret '{}' (epoch {}) to the clipboard.",
@@ -2864,8 +3022,7 @@ fn cmd_hd_remove(owner: &str, m: &ArgMatches) -> Result<(), String> {
 /// buffer (no scrollback, vanishes on exit) with a countdown below it; the
 /// window closes when `--timeout` seconds elapse or the user presses **any key**
 /// (including `Ctrl-C` and `Ctrl-Z`, which cannot kill or suspend it mid-secret),
-/// and the region is wiped before the main screen returns. `--mode` is a
-/// display-only override, exactly as `export` had.
+/// and the region is wiped before the main screen returns.
 fn cmd_hd_reveal(owner: &str, m: &ArgMatches) -> Result<(), String> {
     // Structural TTY guard, enforced before any keystore work or password
     // prompt: the countdown reads keys from raw-mode stdin, and the alt-screen
@@ -2882,13 +3039,11 @@ fn cmd_hd_reveal(owner: &str, m: &ArgMatches) -> Result<(), String> {
     let (rs, seed) = unlock_owner(&ks, owner)?;
     let (def, superseded) = find_stored_def(&ks, &rs, &seed, m, parse_recover(m)?)?;
     let master = master_for(&ks, &rs, &seed)?;
-    // Hold the secret in a zeroizing buffer: scrubbed the moment it drops
-    let secret = Zeroizing::new(registry_secret(
-        &master,
-        &def,
-        m.get_one::<String>("mode").map(String::as_str),
-    )?);
+    // The --setup mode gate fires before any rendering (the flag means the
+    // otp enrollment view; the view itself is assembled below).
+    let setup = check_setup_mode(&def, m.get_flag("setup"))?;
     let timeout = std::time::Duration::from_secs(parse_timeout(m)?);
+    let group = scope_group_name(&rs);
 
     // On the main screen, before the alt screen takes over: the note carries no
     // secret, and the main screen (and this note with it) returns on exit.
@@ -2899,8 +3054,65 @@ fn cmd_hd_reveal(owner: &str, m: &ArgMatches) -> Result<(), String> {
     // The no-echo unlock prompt can leave the terminal without cooked input;
     // re-assert it before switching to the alt screen so a clean state returns.
     terminal::ensure_line_input();
-    reveal_window(&def, scope_group_name(&rs), &secret, timeout)
-        .map_err(|e| format!("Reveal failed: {e}"))
+
+    // --setup: the one-time enrollment view (gate above guarantees otp mode).
+    // The QR is rendered in both polarities up front; the frame closure picks
+    // by its color flag, so the wipe sizing (which passes color = false) sizes
+    // itself over the escape-free rendering.
+    if setup {
+        let b32 = Zeroizing::new(registry_secret(&master, &def)?);
+        let uri = format::otpauth_uri(&def.id, &def.user, &b32);
+        // The QR is a visual encoding of the URI (which carries the secret),
+        // so its buffers get the same scrub-on-drop treatment.
+        //
+        // A URI too long to encode is not a reason to fail the whole view: the
+        // paste and manual-entry paths still work, and `setup_lines` prints a
+        // note in place of the block. `MAX_HD_STRING_LEN` bounds id/user well
+        // inside a QR's capacity, so this is only reachable for a definition
+        // stored before that bound existed.
+        let qr_color = Zeroizing::new(crate::qr::rows(&uri, true).unwrap_or_default());
+        let qr_plain = Zeroizing::new(crate::qr::rows(&uri, false).unwrap_or_default());
+        // No measurable height (no stty): assume the classic 24-row terminal
+        // rather than blindly overflow the alt screen
+        let max_rows = terminal::rows().unwrap_or(24);
+        return reveal_window(timeout, |secs, t, waterline, color| {
+            let qr = if color { &qr_color } else { &qr_plain };
+            setup_lines(
+                &def, group, &b32, &uri, qr, max_rows, secs, t, waterline, color,
+            )
+        })
+        .map_err(|e| format!("Reveal failed: {e}"));
+    }
+
+    // otp mode without --setup (which returned above): the live view. The code
+    // is recomputed from the wall clock inside the frame closure, so a 30s
+    // rollover shows the fresh code on the very next frame instead of a stale
+    // print-and-exit snapshot.
+    if def.params.mode == "otp" {
+        let key = Zeroizing::new(hd_child_of(&master, &def).to_bytes_le());
+        // Surface a broken clock as a clean error before the alt screen is up
+        unix_now()?;
+        return reveal_window(timeout, |secs, t, waterline, color| {
+            otp_frame(
+                &def,
+                group,
+                totp::key(&key),
+                unix_now().unwrap_or(0),
+                secs,
+                t,
+                waterline,
+                color,
+            )
+        })
+        .map_err(|e| format!("Reveal failed: {e}"));
+    }
+
+    // Hold the secret in a zeroizing buffer: scrubbed the moment it drops
+    let secret = Zeroizing::new(registry_secret(&master, &def)?);
+    reveal_window(timeout, |secs, t, waterline, color| {
+        reveal_lines(&def, group, &secret, secs, t, waterline, color)
+    })
+    .map_err(|e| format!("Reveal failed: {e}"))
 }
 
 /// The lines shown in a `reveal` window: a dim header describing the entry, the
@@ -2918,11 +3130,49 @@ fn reveal_lines(
     waterline: f64,
     color: bool,
 ) -> Vec<String> {
-    let (dim, bright, reset) = if color {
-        ("\x1b[90m", "\x1b[97m", "\x1b[0m")
+    let (bright, reset) = if color {
+        ("\x1b[97m", "\x1b[0m")
     } else {
-        ("", "", "")
+        ("", "")
     };
+    reveal_frame(
+        def,
+        group,
+        format!("{bright}{secret}{reset}"),
+        secs,
+        t,
+        waterline,
+        color,
+    )
+}
+
+/// The reveal-window skeleton shared by every view: dim header, the given
+/// (pre-styled) `body` line, and the wave/countdown footer. The body is the
+/// only part that differs between a static secret and a live code.
+fn reveal_frame(
+    def: &crate::registry::Definition,
+    group: Option<&str>,
+    body: String,
+    secs: u64,
+    t: f64,
+    waterline: f64,
+    color: bool,
+) -> Vec<String> {
+    let (dim, reset) = if color { ("\x1b[90m", "\x1b[0m") } else { ("", "") };
+    let head = reveal_headline(def, group);
+    let wave = clipboard::render_wave(t, waterline, color);
+    vec![
+        format!("{dim}Revealing {head}{reset}"),
+        String::new(),
+        body,
+        String::new(),
+        format!("{wave}{reset}  {dim}Clearing in {secs}s  (press any key to clear now){reset}"),
+    ]
+}
+
+/// `{group} · {id} · {user} (epoch N)`, the entry description every reveal
+/// view leads with (group/user omitted when absent)
+fn reveal_headline(def: &crate::registry::Definition, group: Option<&str>) -> String {
     let mut head = String::new();
     if let Some(g) = group {
         head.push_str(&format!("{g} · "));
@@ -2932,23 +3182,107 @@ fn reveal_lines(
         head.push_str(&format!(" · {}", def.user));
     }
     head.push_str(&format!(" (epoch {})", def.epoch));
-    let wave = clipboard::render_wave(t, waterline, color);
-    vec![
-        format!("{dim}Revealing {head}{reset}"),
-        String::new(),
-        format!("{bright}{secret}{reset}"),
-        String::new(),
-        format!("{wave}{reset}  {dim}Clearing in {secs}s  (press any key to clear now){reset}"),
-    ]
+    head
 }
 
-/// Drive the `reveal` alt-screen window to completion (timeout or keypress), wiping
-/// the rendered region before restoring the main screen.
-fn reveal_window(
+/// The `reveal --setup` frame: the one-time TOTP enrollment view, rendering
+/// everything an importer can take - the Base32 secret (manual entry), the
+/// otpauth URI (paste), and the QR block (phone scan) - over the shared
+/// countdown footer.
+///
+/// The QR is included only when the whole layout fits `max_rows`: a 37-module
+/// code plus header and footer runs ~30 rows, taller than a classic 24-row
+/// terminal, and a per-frame `ESC[H` redraw that overflows the screen would
+/// scroll-garbage the alt buffer. When it does not fit, one hint line stands
+/// in and the URI/Base32 remain (every enrollment stays possible, just not by
+/// scan). Pure, so the layout and the fallback are unit-testable.
+#[allow(clippy::too_many_arguments)]
+fn setup_lines(
     def: &crate::registry::Definition,
     group: Option<&str>,
-    secret: &str,
+    b32: &str,
+    uri: &str,
+    qr_rows: &[String],
+    max_rows: usize,
+    secs: u64,
+    t: f64,
+    waterline: f64,
+    color: bool,
+) -> Vec<String> {
+    let (dim, bright, reset) = if color {
+        ("\x1b[90m", "\x1b[97m", "\x1b[0m")
+    } else {
+        ("", "", "")
+    };
+    let head = reveal_headline(def, group);
+    let mut lines = vec![
+        format!("{dim}Enrolling {head} - scan, or paste the URI or Base32 secret{reset}"),
+        String::new(),
+        format!("{dim}Secret (Base32):{reset}  {bright}{b32}{reset}"),
+        format!("{dim}URI:{reset}  {bright}{uri}{reset}"),
+        String::new(),
+    ];
+    // Rows the full layout needs: what we have, the QR, a blank, the footer
+    let need = lines.len() + qr_rows.len() + 2;
+    if qr_rows.is_empty() {
+        // The URI would not encode (see the caller): the other two enrollment
+        // paths, paste and manual entry, are unaffected, so say so and go on.
+        lines.push(format!(
+            "{dim}(the URI is too long to encode as a QR - paste it instead){reset}"
+        ));
+    } else if need <= max_rows {
+        lines.extend(qr_rows.iter().cloned());
+    } else {
+        lines.push(format!(
+            "{dim}(terminal too short for the QR: {need} rows needed - showing the URI only){reset}"
+        ));
+    }
+    lines.push(String::new());
+    let wave = clipboard::render_wave(t, waterline, color);
+    lines.push(format!(
+        "{wave}{reset}  {dim}Clearing in {secs}s  (press any key to clear now){reset}"
+    ));
+    lines
+}
+
+/// One frame of the **live otp view**: the code for `now`, with its own
+/// rolls-in countdown beside it. The code carries no digit grouping (what you
+/// read must equal what you type) and the seconds are padded to a fixed two
+/// columns, so every frame of the body line has the same width - which is what
+/// lets the wipe-sizing call cover it for any timestamp.
+#[allow(clippy::too_many_arguments)]
+fn otp_frame(
+    def: &crate::registry::Definition,
+    group: Option<&str>,
+    key: &[u8],
+    now: u64,
+    secs: u64,
+    t: f64,
+    waterline: f64,
+    color: bool,
+) -> Vec<String> {
+    let (dim, bright, reset) = if color {
+        ("\x1b[90m", "\x1b[97m", "\x1b[0m")
+    } else {
+        ("", "", "")
+    };
+    let code = Zeroizing::new(totp::code(key, now));
+    let left = totp::secs_left_in_window(now);
+    let body = format!("{bright}{}{reset}  {dim}·  rolls in {left:>2}s{reset}", &*code);
+    reveal_frame(def, group, body, secs, t, waterline, color)
+}
+
+/// Drive a `reveal` alt-screen window to completion (timeout or keypress),
+/// wiping the rendered region before restoring the main screen.
+///
+/// `frame_lines(secs, t, waterline, color)` renders one frame: `secs` is the
+/// whole seconds left in the window, `t` the elapsed seconds, `waterline` the
+/// fraction of the window remaining. The static-secret view closes over a
+/// fixed rendering; the otp view recomputes the live code inside the closure,
+/// so a window rollover shows up on the very next frame.
+fn reveal_window(
     timeout: std::time::Duration,
+    frame_lines: impl Fn(u64, f64, f64, bool) -> Vec<String>,
 ) -> std::io::Result<()> {
     use std::io::Write;
     let color = std::env::var_os("NO_COLOR").is_none();
@@ -2965,15 +3299,7 @@ fn reveal_window(
             0.0
         };
         let mut buf = String::from("\x1b[H");
-        for line in reveal_lines(
-            def,
-            group,
-            secret,
-            secs,
-            elapsed.as_secs_f64(),
-            waterline,
-            color,
-        ) {
+        for line in frame_lines(secs, elapsed.as_secs_f64(), waterline, color) {
             buf.push_str(&line);
             buf.push_str("\x1b[K\n");
         }
@@ -2989,7 +3315,7 @@ fn reveal_window(
     // possible failure mode: it would abandon the user on the alt screen, with
     // the secret still displayed and the cursor still hidden. Errors are
     // collected and reported only once the terminal is back.
-    let plain = reveal_lines(def, group, secret, 0, 0.0, 0.0, false);
+    let plain = frame_lines(0, 0.0, 0.0, false);
     let width = plain.iter().map(|l| l.chars().count()).max().unwrap_or(0);
     let wiped = terminal::wipe_region(&mut out, plain.len(), width);
     let cleared = terminal::clear_screen(&mut out);
@@ -3305,11 +3631,25 @@ fn hd_apply<T: wizard::Terminal>(term: &mut T, token_str: &str) -> Result<(), St
 /// creation and re-gated on every ingress, exactly like [`validate_params`].
 /// The `{:?}` in the message escapes what it names, so the error cannot itself
 /// deliver the payload.
+///
+/// Both strings are also length-bounded by [`MAX_HD_STRING_LEN`]. They are
+/// display strings (a table cell, a prompt) and, under `--mode otp`, the label
+/// and issuer of the `otpauth://` URI the QR encodes. A QR tops out near 2,950
+/// bytes; the worst URI this bound admits (every byte of both strings
+/// percent-encoded to three, and the issuer appearing twice) is about 2,370, so
+/// an id that renders is an id that scans. The error reports the length, never
+/// the string.
 fn validate_hd_strings(id: &str, user: &str) -> Result<(), String> {
     for (what, s) in [("id", id), ("user", user)] {
         if s.chars().any(char::is_control) {
             return Err(format!(
                 "Definition {what} {s:?} contains control characters"
+            ));
+        }
+        if s.len() > MAX_HD_STRING_LEN {
+            return Err(format!(
+                "Definition {what} is {} bytes; the maximum is {MAX_HD_STRING_LEN}",
+                s.len()
             ));
         }
     }
@@ -3318,8 +3658,11 @@ fn validate_hd_strings(id: &str, user: &str) -> Result<(), String> {
 
 fn validate_params(p: &crate::registry::Params) -> Result<(), String> {
     let max = format::max_len(&p.mode).ok_or_else(|| format!("unknown mode '{}'", p.mode))?;
-    if p.mode == "bip39" && (p.length.is_some() || p.suffix.is_some()) {
-        return Err("--length and --suffix are not compatible with bip39 output".into());
+    if format::fixed_rendering(&p.mode) && (p.length.is_some() || p.suffix.is_some()) {
+        return Err(format!(
+            "--length and --suffix are not compatible with {} output",
+            p.mode
+        ));
     }
     if let Some(set) = &p.symbols {
         // The `supports_symbols` check fires first so the message names the
@@ -3480,20 +3823,29 @@ fn merge_params(
     } else {
         base.suffix
     };
-    // BIP39 is a fixed 24-word rendering: it can carry neither a trim nor a suffix
-    if mode == "bip39" {
+    // bip39 (a 24-word mnemonic) and otp (a 32-character TOTP secret) are
+    // fixed-shape renderings: they can carry neither a trim nor a suffix
+    if format::fixed_rendering(&mode) {
         if length.is_some() {
             if length_asked_for {
-                return Err("--length and --suffix are not compatible with bip39 output".into());
+                return Err(format!(
+                    "--length and --suffix are not compatible with {mode} output"
+                ));
             }
-            notes.push("Dropped --length: bip39 output is a fixed 24-word mnemonic.".into());
+            notes.push(format!(
+                "Dropped --length: {mode} output is a fixed shape that cannot be trimmed."
+            ));
             length = None;
         }
         if suffix.is_some() {
             if suffix_asked_for {
-                return Err("--length and --suffix are not compatible with bip39 output".into());
+                return Err(format!(
+                    "--length and --suffix are not compatible with {mode} output"
+                ));
             }
-            notes.push("Dropped --suffix: bip39 output is a fixed 24-word mnemonic.".into());
+            notes.push(format!(
+                "Dropped --suffix: {mode} output is a fixed shape that cannot carry one."
+            ));
             suffix = None;
         }
     }
@@ -3666,6 +4018,84 @@ mod tests {
             parse_params(&create_matches(&["--mode", "bip39", "--length", "14"]).unwrap()).is_err()
         );
         assert!(parse_params(&create_matches(&["--mode", "bip39", "--symbols"]).unwrap()).is_err());
+    }
+
+    // `otp` is a fixed shape like bip39: a bare create resolves neither a
+    // length nor a set, and asking for either is a parse-time contradiction.
+    #[test]
+    fn bare_otp_create_resolves_no_length_and_no_symbols() {
+        assert_eq!(mode_defaults("otp"), (None, None));
+        let p = parse_params(&create_matches(&["--mode", "otp"]).unwrap()).unwrap();
+        assert_eq!(p.mode, "otp");
+        assert_eq!(p.length, None);
+        assert_eq!(p.symbols, None);
+        assert_eq!(p.suffix, None);
+        assert_eq!(
+            p.describe(),
+            "--mode otp --length none --no-symbols --suffix none"
+        );
+    }
+
+    #[test]
+    fn otp_create_rejects_length_suffix_and_symbols() {
+        for extra in [
+            &["--length", "8"][..],
+            &["--suffix", "x"][..],
+            &["--symbols"][..],
+        ] {
+            let mut args = vec!["--mode", "otp"];
+            args.extend_from_slice(extra);
+            let e = parse_params(&create_matches(&args).unwrap()).unwrap_err();
+            assert!(e.contains("otp"), "{extra:?}: the error names the mode: {e}");
+        }
+    }
+
+    // `rotate --mode otp` over a defaulted b58 recipe: every param the fixed
+    // shape cannot render is dropped, each with its own note (the bip39
+    // behaviour, now shared through `format::fixed_rendering`).
+    #[test]
+    fn rotate_to_otp_drops_length_symbols_and_suffix_with_notes() {
+        let defaulted = Params {
+            mode: "b58".into(),
+            length: Some(14),
+            symbols: Some(format::SYMBOLS.into()),
+            suffix: Some("!!".into()),
+        };
+        let (p, notes) =
+            merge_params(&rotate_matches(&["--mode", "otp"]).unwrap(), defaulted).unwrap();
+        assert_eq!(
+            p,
+            Params {
+                mode: "otp".into(),
+                length: None,
+                symbols: None,
+                suffix: None
+            }
+        );
+        assert_eq!(notes.len(), 3, "every drop is announced: {notes:?}");
+
+        // Asking for the contradiction on the same command line stays an error
+        let base = || Params {
+            mode: "b58".into(),
+            length: None,
+            symbols: None,
+            suffix: None,
+        };
+        assert!(merge_params(
+            &rotate_matches(&["--mode", "otp", "--length", "8"]).unwrap(),
+            base()
+        )
+        .is_err());
+        assert!(merge_params(
+            &rotate_matches(&["--mode", "otp", "--suffix", "x"]).unwrap(),
+            base()
+        )
+        .is_err());
+        assert!(merge_params(
+            &rotate_matches(&["--mode", "otp", "--symbols"]).unwrap(),
+            base()
+        )
+        .is_err());
     }
 
     // `rotate` merges over the *stored* params and fills in nothing, so a
@@ -3884,6 +4314,34 @@ mod tests {
         }
     }
 
+    // id/user are bounded so that the `otpauth://` URI an otp definition builds
+    // stays far inside a QR code's capacity and so a table cell or a prompt
+    // cannot be flooded. The error reports a length, never the string.
+    #[test]
+    fn hd_strings_are_length_bounded() {
+        let at = "a".repeat(MAX_HD_STRING_LEN);
+        let over = "a".repeat(MAX_HD_STRING_LEN + 1);
+        assert!(validate_hd_strings(&at, &at).is_ok(), "the bound is inclusive");
+        for (id, user) in [(over.as_str(), ""), ("ok", over.as_str())] {
+            let e = validate_hd_strings(id, user).unwrap_err();
+            assert!(e.contains(&format!("{}", MAX_HD_STRING_LEN + 1)), "{e}");
+            assert!(!e.contains("aaaa"), "the error must not echo the string: {e}");
+        }
+
+        // The bound's purpose, asserted against the worst case it admits: every
+        // byte of id and user percent-encoded to three, with the issuer
+        // appearing twice. That URI must still fit in a QR (~2,950 bytes), or
+        // an id that renders would be an id that cannot be scanned.
+        let worst = "\u{7f}".repeat(MAX_HD_STRING_LEN); // 1 byte -> "%7F"
+        let uri = format::otpauth_uri(&worst, &worst, &"A".repeat(32));
+        assert_eq!(uri.len(), 64 + 3 * 3 * MAX_HD_STRING_LEN);
+        assert!(
+            crate::qr::rows(&uri, false).is_ok(),
+            "the worst URI the bound admits ({} bytes) must still encode",
+            uri.len()
+        );
+    }
+
     // A suffix is pasted into passwords and printed back by `describe()`; a
     // control character is hostile or a mistake in either role. Gated in
     // `validate_params`, which both `apply` and `import` re-run on ingress.
@@ -3945,31 +4403,95 @@ mod tests {
         );
     }
 
-    // `--mode` on `copy`/`show` is a display-only override that bypasses the
-    // stored, already-validated params, so the set is re-checked against the
-    // overridden mode's alphabet.
+    // Egress is single-valued: only `create`/`rotate` choose a mode, and they
+    // choose it for the definition. See [`registry_secret`] for why the reading
+    // commands must not.
     #[test]
-    fn a_mode_override_rechecks_the_stored_symbol_set() {
+    fn copy_and_reveal_take_no_mode_override() {
+        for sub in ["copy", "reveal"] {
+            for extra in [&["--mode", "hex"][..], &["-m", "otp"][..]] {
+                let err = sub_matches(sub, extra).unwrap_err();
+                assert_eq!(
+                    err.kind(),
+                    clap::error::ErrorKind::UnknownArgument,
+                    "{sub} must reject {extra:?}"
+                );
+            }
+        }
+        // `create` and `rotate` still take it: that is *setting* the recipe,
+        // not casting an existing one (and `rotate` advances the epoch, so the
+        // secret changes with the shape).
+        assert!(create_matches(&["--mode", "hex"]).is_ok());
+        assert!(rotate_matches(&["--mode", "otp"]).is_ok());
+    }
+
+    // One definition, one rendering: whatever the stored params say, including
+    // the symbol set that was validated when it was stored.
+    #[test]
+    fn registry_secret_renders_the_stored_params_only() {
         use crate::crypto::hd_child;
         let master = hd_child(&Scalar::from(7u64), b"ctx");
-        let with_set = |mode: &str, set: &str| Definition {
+        let with = |mode: &str, length: Option<u64>, symbols: Option<&str>| Definition {
             params: Params {
                 mode: mode.into(),
-                length: None,
-                symbols: Some(set.into()),
+                length,
+                symbols: symbols.map(str::to_string),
                 suffix: None,
             },
             ..def("site", "", 1)
         };
 
-        // 'a' is legal under b10 and collides with hex's alphabet
-        let stored = with_set("b10", "a");
-        assert!(registry_secret(&master, &stored, None).is_ok());
-        assert!(registry_secret(&master, &stored, Some("hex")).is_err());
-        // A mode that takes no symbols at all is refused by name
-        assert!(registry_secret(&master, &stored, Some("alpha")).is_err());
-        // A non-colliding override still renders
-        assert!(registry_secret(&master, &with_set("b58", "!@"), Some("hex")).is_ok());
+        // A stored otp def renders its 32-char Base32 secret, and that is the
+        // same pipeline `format_bytes` drives (no separate otp code path).
+        let otp = with("otp", None, None);
+        let out = registry_secret(&master, &otp).unwrap();
+        let child = hd_child_of(&master, &otp);
+        assert_eq!(out, format::format_bytes(&child.to_bytes_le(), "otp").unwrap());
+        assert_eq!(out.len(), 32);
+
+        // A stored password def renders its password - a *different* string
+        // from the otp export of the same id/user/epoch under a different def.
+        let pw = with("b58", Some(14), Some("!@"));
+        let rendered = registry_secret(&master, &pw).unwrap();
+        assert_eq!(rendered.chars().count(), 14);
+        assert_ne!(rendered, out);
+
+        // A hand-edited registry whose params no longer render is an error, not
+        // a panic: `format_secret` is still the gate (it always was).
+        let broken = with("hex", None, Some("a")); // 'a' collides with hex
+        assert!(registry_secret(&master, &broken).is_err());
+        let impossible = with("bip39", Some(20), None); // fixed shape + a trim
+        assert!(registry_secret(&master, &impossible).is_err());
+    }
+
+    // `--setup` is the otp enrollment view: allowed exactly for an otp
+    // definition, and the error points at a separate one rather than at this
+    // definition's own child (which would alias a password into a TOTP seed).
+    #[test]
+    fn setup_gate_requires_an_otp_definition() {
+        let otp_def = Definition {
+            params: Params {
+                mode: "otp".into(),
+                length: None,
+                symbols: None,
+                suffix: None,
+            },
+            ..def("vpn", "", 1)
+        };
+        let b58_def = def("site", "", 1);
+
+        // No flag: no gate, whatever the mode
+        assert!(!check_setup_mode(&otp_def, false).unwrap());
+        assert!(!check_setup_mode(&b58_def, false).unwrap());
+
+        // The flag passes for an otp definition
+        assert!(check_setup_mode(&otp_def, true).unwrap());
+
+        // ...and is refused for any other, naming its mode and pointing at a
+        // separate definition rather than a cast
+        let e = check_setup_mode(&b58_def, true).unwrap_err();
+        assert!(e.contains("--setup") && e.contains("otp") && e.contains("b58"), "{e}");
+        assert!(e.contains("separate"), "{e}");
     }
 
     #[test]
@@ -4053,5 +4575,170 @@ mod tests {
             !joined.contains('·'),
             "no group/user separators when both absent"
         );
+    }
+
+    // The Params annotation: an untrimmed b58 recipe gets its rendered length;
+    // an otp recipe does not so "(32 chars)" would describe the Base32 export,
+    // not the 6-digit codes the user will see.
+    #[test]
+    fn describe_params_skips_the_rendered_length_for_otp() {
+        use crate::crypto::hd_child;
+        let master = hd_child(&Scalar::from(7u64), b"ctx");
+        let with_mode = |mode: &str| Definition {
+            params: Params {
+                mode: mode.into(),
+                length: None,
+                symbols: None,
+                suffix: None,
+            },
+            ..def("site", "", 1)
+        };
+        assert!(
+            describe_params(&master, &with_mode("b58")).contains("chars"),
+            "untrimmed b58 recipes stay annotated"
+        );
+        let described = describe_params(&master, &with_mode("otp"));
+        assert!(!described.contains("chars"), "{described}");
+        assert_eq!(described, "--mode otp --length none --no-symbols --suffix none");
+    }
+
+    // The copy countdown's refresh closure: silent within a window, one fresh
+    // code per rollover, and silent again until the next one.
+    #[test]
+    fn otp_refresher_fires_exactly_once_per_window_rollover() {
+        let key = Zeroizing::new([7u8; format::SCALAR_BYTES]);
+        // A scripted clock: two ticks in the start window, two in the next,
+        // one two windows later, and one unreadable instant.
+        let script: Vec<Option<u64>> =
+            vec![Some(70), Some(89), Some(90), Some(95), Some(150), None];
+        let mut i = 0;
+        let mut refresh = otp_refresher(&key, 70, move || {
+            let t = script[i];
+            i += 1;
+            t
+        });
+
+        assert!(refresh().is_none(), "same window as the initial copy");
+        assert!(refresh().is_none(), "still the same window");
+        let rolled = refresh().expect("the window rolled at t=90");
+        assert_eq!(*rolled, totp::code(totp::key(&key), 90));
+        assert!(refresh().is_none(), "already refreshed for this window");
+        let again = refresh().expect("a later window refreshes again");
+        assert_eq!(*again, totp::code(totp::key(&key), 150));
+        assert_ne!(*rolled, *again);
+        assert!(refresh().is_none(), "an unreadable clock skips the refresh");
+    }
+
+    // The enrollment frame: Base32 + URI always; the QR exactly when it fits.
+    #[test]
+    fn setup_lines_include_the_qr_when_the_terminal_is_tall_enough() {
+        let d = def("vpn", "bob", 1);
+        let b32 = "A4DQOBYHA4DQOBYHA4DQOBYHA4DQOBYH";
+        let uri = format!("otpauth://totp/vpn:bob?secret={b32}&issuer=vpn");
+        let qr = crate::qr::rows(&uri, false).unwrap();
+
+        let ample = setup_lines(&d, Some("grp"), b32, &uri, &qr, 200, 60, 0.0, 1.0, false);
+        let joined = ample.join("\n");
+        assert!(joined.contains(b32));
+        assert!(joined.contains(&uri));
+        assert!(joined.contains("Enrolling grp · vpn · bob (epoch 1)"));
+        assert!(joined.contains("Clearing in 60s"));
+        assert!(!joined.contains('\x1b'), "no-color frames carry no escapes");
+        // Every QR row is present, verbatim
+        for row in qr.iter() {
+            assert!(ample.contains(row), "missing QR row");
+        }
+        // ... and the whole layout honours its own row accounting
+        assert_eq!(ample.len(), 5 + qr.len() + 2);
+
+        // The wipe width (max over these lines) covers the QR block
+        let width = ample.iter().map(|l| l.chars().count()).max().unwrap();
+        assert!(width >= qr[0].chars().count());
+    }
+
+    #[test]
+    fn setup_lines_swap_the_qr_for_a_hint_on_a_short_terminal() {
+        let d = def("vpn", "", 1);
+        let b32 = "A4DQOBYHA4DQOBYHA4DQOBYHA4DQOBYH";
+        let uri = format!("otpauth://totp/vpn?secret={b32}&issuer=vpn");
+        let qr = crate::qr::rows(&uri, false).unwrap();
+
+        // A classic 24-row terminal cannot hold header + ~21-row QR + footer.
+        // Waterline 0.0 keeps the footer wave flat ('▁'), so a '█' can only be
+        // a QR cell.
+        let short = setup_lines(&d, None, b32, &uri, &qr, 24, 60, 0.0, 0.0, false);
+        let joined = short.join("\n");
+        assert!(joined.contains("terminal too short for the QR"), "{joined}");
+        assert!(!joined.contains('█'), "no QR cells in the fallback");
+        // The URI and Base32 survive: enrollment by paste still works
+        assert!(joined.contains(&uri));
+        assert!(joined.contains(b32));
+        assert!(short.len() <= 24, "the fallback must itself fit");
+
+        // The boundary is exact: the QR appears the moment it fits
+        let exact = 5 + qr.len() + 2;
+        assert!(setup_lines(&d, None, b32, &uri, &qr, exact, 60, 0.0, 0.0, false)
+            .join("\n")
+            .contains('█'));
+        assert!(!setup_lines(&d, None, b32, &uri, &qr, exact - 1, 60, 0.0, 0.0, false)
+            .join("\n")
+            .contains('█'));
+    }
+
+    // A URI that will not encode as a QR costs the QR block, not the view: the
+    // Base32 and the URI still enroll by typing and by pasting.
+    #[test]
+    fn setup_lines_survive_a_qr_that_cannot_be_encoded() {
+        let d = def("vpn", "", 1);
+        let b32 = "A4DQOBYHA4DQOBYHA4DQOBYHA4DQOBYH";
+        let uri = format!("otpauth://totp/vpn?secret={b32}&issuer=vpn");
+        let lines = setup_lines(&d, None, b32, &uri, &[], 200, 60, 0.0, 0.0, false);
+        let joined = lines.join("\n");
+        assert!(joined.contains("too long to encode"), "{joined}");
+        assert!(joined.contains(b32) && joined.contains(&uri));
+        assert!(!joined.contains('█'), "no QR block");
+    }
+
+    // The live otp frame: the RFC 6238 code for the given instant, beside its
+    // own rolls-in countdown, over the shared header/footer skeleton.
+    #[test]
+    fn otp_frame_shows_the_live_code_and_rollover_countdown() {
+        let d = def("vpn", "", 2);
+        let key: &[u8] = b"12345678901234567890";
+        // RFC 6238 Appendix B: T = 59 -> 287082, with 1s left in its window
+        let lines = otp_frame(&d, None, key, 59, 42, 0.5, 0.7, false);
+        let joined = lines.join("\n");
+        assert!(joined.contains("287082"), "{joined}");
+        assert!(joined.contains("rolls in  1s"), "{joined}");
+        assert!(joined.contains("Revealing vpn (epoch 2)"));
+        assert!(joined.contains("Clearing in 42s"));
+        // No-colour frames carry no escape sequences
+        assert!(!joined.contains('\x1b'));
+
+        // One second later the window has rolled: new code, reset countdown
+        let rolled = otp_frame(&d, None, key, 60, 42, 0.5, 0.7, false).join("\n");
+        assert!(!rolled.contains("287082"), "{rolled}");
+        assert!(rolled.contains("rolls in 30s"), "{rolled}");
+    }
+
+    // The wipe sizes itself from a single frame_lines call; the otp body pads
+    // its rollover seconds to a fixed two columns so that call bounds the body
+    // width for **every** timestamp a later frame might render.
+    #[test]
+    fn otp_frame_width_is_timestamp_independent_so_the_wipe_covers_it() {
+        let d = def("vpn", "bob", 1);
+        let key: &[u8] = b"12345678901234567890";
+        let wipe = otp_frame(&d, Some("grp"), key, 0, 0, 0.0, 0.0, false);
+        let wipe_width = wipe.iter().map(|l| l.chars().count()).max().unwrap();
+        for now in (0..600).step_by(7) {
+            let frame = otp_frame(&d, Some("grp"), key, now, 0, 0.0, 0.0, false);
+            let width = frame.iter().map(|l| l.chars().count()).max().unwrap();
+            assert!(width <= wipe_width, "frame at t={now} wider than the wipe");
+            assert_eq!(
+                frame[2].chars().count(),
+                wipe[2].chars().count(),
+                "body width must not depend on the timestamp"
+            );
+        }
     }
 }

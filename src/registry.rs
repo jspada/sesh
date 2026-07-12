@@ -5,9 +5,8 @@
 //! strictly-increasing version that is *also* the derivation index) plus the
 //! formatting `params`. **No secret value and no `K` is ever stored**, but only the
 //! recipe. The child secret is `hd_child(master, canonical(id, user, epoch))`
-//! formatted by `params`; params never enter the derivation, so viewing an entry
-//! in a different format needs no new version (`copy`/`reveal` take a
-//! display-only `--mode` override).
+//! formatted by `params`; params never enter the derivation, but they are the
+//! only thing that formats it, so a definition renders exactly one way.
 //!
 //! Because `params` never enter the derivation, a past epoch's *secret* is
 //! always re-derivable but its *password* is not: the string depends on a recipe

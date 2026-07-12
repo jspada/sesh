@@ -30,10 +30,28 @@ fn pw_lines() -> String {
 //
 // Commands that *do* unlock a seed use [`sesh_pw`] instead, so each such call
 // site is a standing statement that this command prompts.
+// `$XDG_CONFIG_HOME` points inside the temp home too, so a test never reads (or
+// is influenced by) the developer's real `~/.config/sesh/config.toml`, which
+// `copy` consults for its settings.
 fn sesh(home: &Path) -> Command {
     let mut cmd = Command::cargo_bin("sesh").unwrap();
-    cmd.env("SESH_HOME", home);
+    cmd.env("SESH_HOME", home)
+        .env("XDG_CONFIG_HOME", home.join("xdg"));
     cmd
+}
+
+// Hand-write the user config at `$XDG_CONFIG_HOME/sesh/config.toml` (mode 0600,
+// as sesh requires) for a test that exercises a setting.
+fn write_user_config(home: &Path, body: &str) {
+    let dir = home.join("xdg").join("sesh");
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = dir.join("config.toml");
+    std::fs::write(&cfg, body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
 }
 
 // A `sesh` invocation with [`PW`] on stdin, for commands that unlock a seed. A
@@ -1710,6 +1728,40 @@ fn make_fixed_identity(home: &Path, name: &str) {
     import_mnemonic(home, name, ZERO_MNEMONIC);
 }
 
+// An over-long id or user is refused where it is created, not left to blow up
+// later in a table cell or (under --mode otp) in a QR code that cannot hold it.
+#[test]
+fn hd_create_rejects_an_over_long_id_or_user() {
+    let home = TempDir::new().unwrap();
+    make_identity(home.path(), "me");
+    let long = "a".repeat(257);
+
+    for args in [
+        vec!["hd-secret", "create", "me", long.as_str()],
+        vec!["hd-secret", "create", "me", "site", long.as_str()],
+        vec!["hd-secret", "create", "me", long.as_str(), "--mode", "otp"],
+    ] {
+        sesh_pw(home.path())
+            .args(&args)
+            .assert()
+            .failure()
+            .stderr(contains("257 bytes").and(contains("maximum is 256")));
+    }
+
+    // The bound is inclusive, and an ordinary id is nowhere near it
+    run_pw(
+        home.path(),
+        &[
+            "hd-secret",
+            "create",
+            "me",
+            &"b".repeat(256),
+            "--mode",
+            "otp",
+        ],
+    );
+}
+
 // A bare `create` produces a memorable recipe (b58, 14 characters, symbols)
 // and **stores** it, so nothing is lost by leaving the flags off.
 #[test]
@@ -2080,10 +2132,11 @@ fn hd_symbols_with_hex_loses_the_0x_prefix() {
     assert!(!hd_secret_of(home.path(), "me", "mixed").starts_with("0x"));
 }
 
+// A symbol set is validated against its mode once, where it is stored, and the
+// definition only ever renders under that mode. `--symbols=a` is legal under
+// b10 and a collision under hex, so `create` is the gate that must catch it.
 #[test]
-fn hd_mode_override_rejects_a_set_that_collides_with_the_overridden_alphabet() {
-    // `--mode` on copy/reveal is a display-only override that bypasses the
-    // stored, already-validated params. 'a' is legal under b10, and a hex digit.
+fn a_stored_symbol_set_is_only_ever_rendered_under_its_own_mode() {
     let home = TempDir::new().unwrap();
     make_fixed_identity(home.path(), "me");
     run_pw(
@@ -2098,15 +2151,26 @@ fn hd_mode_override_rejects_a_set_that_collides_with_the_overridden_alphabet() {
             "--symbols=a",
         ],
     );
-    assert!(!hd_secret_of(home.path(), "me", "x").is_empty());
-
-    let clip = home.path().join("clip.txt");
+    let secret = hd_secret_of(home.path(), "me", "x");
+    assert!(
+        secret.chars().all(|c| c.is_ascii_digit() || c == 'a'),
+        "{secret} must draw from b10 ∪ {{a}}"
+    );
+    // The same recipe under hex would be a collision, and `create` refuses it
+    // at the one gate that matters: the point of storage.
     sesh_pw(home.path())
-        .env("SESH_CLIPBOARD_CMD", format!("cat > {}", clip.display()))
-        .args(["hd-secret", "copy", "me", "x", "--mode", "hex"])
+        .args([
+            "hd-secret",
+            "create",
+            "me",
+            "y",
+            "--mode",
+            "hex",
+            "--symbols=a",
+        ])
         .assert()
         .failure()
-        .stderr(contains("drop the --mode override"));
+        .stderr(contains("hex").and(contains("already uses")));
 }
 
 #[test]
@@ -2213,9 +2277,12 @@ fn registry_create_show_list_roundtrip() {
     assert_eq!(table_cell(&listed, "google.com", 3), default_params_row());
     assert_eq!(table_cell(&listed, "google.com", 4), fpr);
     assert!(!listed.contains(&secret));
+    // The plain listing swaps Params for a bare Mode column (verbose already
+    // names the mode inside Params)
     let plain = run_pw(home.path(), &["hd-secret", "list", "me"]);
     assert!(!plain.contains("Params"), "{plain}");
-    assert_eq!(table_cell(&plain, "google.com", 3), fpr);
+    assert_eq!(table_cell(&plain, "google.com", 3), "b58");
+    assert_eq!(table_cell(&plain, "google.com", 4), fpr);
 
     // A duplicate create errors (use rotate to change it)
     sesh_pw(home.path())
@@ -2457,42 +2524,301 @@ fn hd_copy_fails_cleanly_when_clipboard_tool_fails() {
         .stderr(contains("clipboard"));
 }
 
+// Egress is single-valued: a definition renders the one way its stored params
+// say, and re-shaping it is a `rotate` (a new epoch, so a new secret too).
 #[test]
-fn hd_mode_override_is_display_only() {
+fn copy_and_reveal_reject_a_mode_override() {
     let home = TempDir::new().unwrap();
     make_identity(home.path(), "me");
     run_pw(home.path(), &["hd-secret", "create", "me", "site"]); // stored: b58
     let b58 = hd_secret_of(home.path(), "me", "site");
-    let fpr = field(
-        &run_pw(home.path(), &["hd-secret", "show", "me", "site"]),
-        "Fingerprint",
+
+    for sub in ["copy", "reveal"] {
+        for flag in [&["--mode", "hex"][..], &["-m", "otp"][..]] {
+            let mut args = vec!["hd-secret", sub, "me", "site"];
+            args.extend_from_slice(flag);
+            sesh_pw(home.path())
+                .env("SESH_CLIPBOARD_CMD", "cat > /dev/null")
+                .args(&args)
+                .assert()
+                .failure()
+                .stderr(contains("unexpected argument").or(contains("--mode")));
+        }
+    }
+
+    // `rotate` is how a shape changes: a new epoch, so a new secret with it
+    assert_eq!(hd_secret_of(home.path(), "me", "site"), b58);
+    run_pw(
+        home.path(),
+        &["hd-secret", "rotate", "me", "site", "--mode", "hex"],
+    );
+    let hex = hd_secret_of(home.path(), "me", "site");
+    assert_ne!(hex, b58, "a new epoch and a new shape");
+    let plain = run_pw(home.path(), &["hd-secret", "list", "me"]);
+    assert_eq!(table_cell(&plain, "site", 3), "hex");
+}
+
+// user settings (~/.config/sesh/config.toml)
+
+// Settings live in the user's config, beside the keystore pointer: they are
+// per-machine (a property of the desktop, not of the secrets), so they neither
+// belong to a keystore nor travel into a backup. A typo in one is heard rather
+// than silently ignored, because the user wrote it expecting it to take effect.
+//
+// (`linux_paste_count` itself only bites on Linux, with a real display server
+// and a real countdown, so the `copy` below is unaffected by it either way.)
+#[test]
+fn user_settings_are_read_from_the_config_and_a_bad_one_is_an_error() {
+    let home = TempDir::new().unwrap();
+    make_identity(home.path(), "me");
+    run_pw(home.path(), &["hd-secret", "create", "me", "site"]);
+
+    // A well-formed setting: copy still works (and on this platform the budget
+    // simply does not apply)
+    write_user_config(home.path(), "linux_paste_count = 1\n");
+    assert!(!hd_secret_of(home.path(), "me", "site").is_empty());
+
+    // A typo'd key, a non-numeric count, and a zero budget are all refused, and
+    // the error names the file
+    for bad in [
+        "linux_paste_cont = 1\n",
+        "linux_paste_count = \"one\"\n",
+        "linux_paste_count = 0\n",
+        "linux_paste_count 1\n",
+    ] {
+        write_user_config(home.path(), bad);
+        sesh_pw(home.path())
+            .env("SESH_CLIPBOARD_CMD", "cat > /dev/null")
+            .args(["hd-secret", "copy", "me", "site"])
+            .assert()
+            .failure()
+            .stderr(contains("config.toml"));
+    }
+
+    // No config at all is simply the defaults
+    std::fs::remove_file(home.path().join("xdg/sesh/config.toml")).unwrap();
+    assert!(!hd_secret_of(home.path(), "me", "site").is_empty());
+}
+
+// hd-secret: --mode otp (TOTP)
+
+// Seconds since the Unix epoch, for bracketing a TOTP code observed from the
+// binary between two locally-taken timestamps.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+// The 20-byte TOTP key of a definition, taken the way an authenticator app
+// takes it: Base32-decoded from the `--setup` enrollment URI. Recomputing codes
+// from this key asks the question that matters - does the code sesh shows match
+// the code an app enrolled from this view would show?
+fn otp_key_of(home: &Path, owner: &str, id: &str) -> Vec<u8> {
+    let uri = copy_secret(
+        home,
+        &home.join(".clip-setup"),
+        &["hd-secret", "copy", owner, id, "--setup"],
+    );
+    let b32 = uri
+        .split("secret=")
+        .nth(1)
+        .expect("the URI carries a secret= parameter")
+        .split('&')
+        .next()
+        .unwrap();
+    let key = base32_decode(b32);
+    assert_eq!(key.len(), 20, "the TOTP key is 160 bits");
+    key
+}
+
+#[test]
+fn otp_copy_puts_the_current_six_digit_code_on_the_clipboard() {
+    let home = TempDir::new().unwrap();
+    make_identity(home.path(), "me");
+    run_pw(
+        home.path(),
+        &["hd-secret", "create", "me", "vpn", "--mode", "otp"],
     );
 
-    // The override applies to copy (and reveal): hex differs from stored b58.
-    // The stored symbol set rides along, so the hex rendering has no `0x`. The
-    // override changes the base alphabet, not the recipe.
-    let clip = home.path().join("clip.txt");
-    sesh_pw(home.path())
-        .env("SESH_CLIPBOARD_CMD", format!("cat > {}", clip.display()))
-        .args(["hd-secret", "copy", "me", "site", "--mode", "hex"])
+    let clip = home.path().join("clip");
+    let t0 = unix_now();
+    let out = sesh_pw(home.path())
+        .env("SESH_CLIPBOARD_CMD", format!("cat > '{}'", clip.display()))
+        .args(["hd-secret", "copy", "me", "vpn"])
         .assert()
         .success();
-    let hex = std::fs::read_to_string(&clip).unwrap();
-    assert_ne!(hex, b58);
-    assert_eq!(hex.chars().count(), 14, "the stored --length still applies");
+    let t1 = unix_now();
+    let code = std::fs::read_to_string(&clip).unwrap();
+
+    // Exactly 6 digits reach the clipboard - never the secret
+    assert_eq!(code.len(), 6, "clipboard held {code:?}");
+    assert!(code.bytes().all(|b| b.is_ascii_digit()));
+
+    // The non-interactive path names the code's remaining validity
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     assert!(
-        hex.chars()
-            .all(|c| "0123456789abcdef".contains(c) || DEFAULT_SYMBOLS.contains(c)),
-        "{hex} must draw from hex ∪ the stored symbol set"
+        stdout.contains("current code, expires in"),
+        "missing expiry note:\n{stdout}"
+    );
+    assert!(!stdout.contains(&code), "the code is never echoed");
+
+    // The code is the RFC 6238 value for the definition's derived key: it must
+    // match a recomputation at one of the bracketing timestamps (both, unless
+    // the copy straddled a 30s window boundary).
+    let key = otp_key_of(home.path(), "me", "vpn");
+    let expected = [sesh::totp::code(&key, t0), sesh::totp::code(&key, t1)];
+    assert!(
+        expected.contains(&code),
+        "clipboard code {code} matches neither bracket {expected:?}"
     );
 
-    // ...but is never persisted: stored params still say b58, the fingerprint
-    // (over the raw child, not its encoding) is unchanged, and a plain copy
-    // still yields b58.
-    let listed = run_pw(home.path(), &["hd-secret", "list", "me", "--verbose"]);
-    assert_eq!(table_cell(&listed, "site", 3), default_params_row());
-    assert_eq!(table_cell(&listed, "site", 4), fpr);
-    assert_eq!(hd_secret_of(home.path(), "me", "site"), b58);
+    // The list's Mode column is what tells a code generator from a password
+    let listed = run_pw(home.path(), &["hd-secret", "list", "me"]);
+    assert_eq!(table_cell(&listed, "vpn", 3), "otp");
+}
+
+// Decode unpadded RFC 4648 Base32 (test-side inverse of the export encoding)
+fn base32_decode(s: &str) -> Vec<u8> {
+    const ALPHABET: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let (mut acc, mut bits, mut out) = (0u32, 0u32, Vec::new());
+    for c in s.chars() {
+        let v = ALPHABET.find(c).expect("Base32 alphabet") as u32;
+        acc = (acc << 5) | v;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    out
+}
+
+#[test]
+fn otp_copy_setup_puts_the_enrollment_uri_on_the_clipboard() {
+    let home = TempDir::new().unwrap();
+    make_identity(home.path(), "me");
+    run_pw(
+        home.path(),
+        &["hd-secret", "create", "me", "ssh-root", "bob", "--mode", "otp"],
+    );
+
+    let uri = copy_secret(
+        home.path(),
+        &home.path().join("clip-uri"),
+        &["hd-secret", "copy", "me", "ssh-root", "bob", "--setup"],
+    );
+    assert!(
+        uri.starts_with("otpauth://totp/ssh-root:bob?"),
+        "label is issuer:account: {uri}"
+    );
+    assert!(uri.ends_with("&issuer=ssh-root"), "{uri}");
+
+    // The secret parameter is a 32-char Base32 export of a 160-bit key...
+    let b32 = uri
+        .split("secret=")
+        .nth(1)
+        .unwrap()
+        .split('&')
+        .next()
+        .unwrap();
+    assert_eq!(b32.len(), 32);
+    assert!(b32.chars().all(|c| matches!(c, 'A'..='Z' | '2'..='7')));
+    assert_eq!(base32_decode(b32).len(), 20);
+
+    // ...and it is the key sesh's own codes come from: an app enrolled from this
+    // URI and `copy` agree, which is the whole promise of the enrollment view.
+    let t0 = unix_now();
+    let code = copy_secret(
+        home.path(),
+        &home.path().join("clip-code"),
+        &["hd-secret", "copy", "me", "ssh-root", "bob"],
+    );
+    let t1 = unix_now();
+    let key = base32_decode(b32);
+    let expected = [sesh::totp::code(&key, t0), sesh::totp::code(&key, t1)];
+    assert!(
+        expected.contains(&code),
+        "the code {code} does not match the enrolled secret {expected:?}"
+    );
+}
+
+#[test]
+fn otp_setup_needs_an_otp_definition() {
+    let home = TempDir::new().unwrap();
+    make_identity(home.path(), "me");
+    run_pw(home.path(), &["hd-secret", "create", "me", "site"]); // b58
+
+    // --setup on a non-otp definition errors, naming the flag, the mode, and
+    // the remedy is a *separate* otp definition, never a cast of this one
+    sesh_pw(home.path())
+        .env("SESH_CLIPBOARD_CMD", "cat > /dev/null")
+        .args(["hd-secret", "copy", "me", "site", "--setup"])
+        .assert()
+        .failure()
+        .stderr(
+            contains("--setup")
+                .and(contains("b58"))
+                .and(contains("separate")),
+        );
+
+    // reveal --setup piped: the structural TTY guard fires first, same message
+    sesh(home.path())
+        .args(["hd-secret", "reveal", "me", "site", "--setup"])
+        .assert()
+        .failure()
+        .stderr(contains("interactive terminal"));
+}
+
+// Guarding an account with both a password and TOTP means two definitions, so
+// two children. That separation is the security property: a TOTP seed the
+// account's own password could reconstruct would be no second factor at all.
+#[test]
+fn a_password_definition_and_an_otp_definition_stay_separate() {
+    let home = TempDir::new().unwrap();
+    make_identity(home.path(), "me");
+    run_pw(home.path(), &["hd-secret", "create", "me", "site"]); // b58 password
+    run_pw(
+        home.path(),
+        &["hd-secret", "create", "me", "site-2fa", "--mode", "otp"],
+    );
+
+    let password = hd_secret_of(home.path(), "me", "site");
+    assert!(password.len() > 6, "a password, not a code: {password}");
+
+    let code = copy_secret(
+        home.path(),
+        &home.path().join("clip-code"),
+        &["hd-secret", "copy", "me", "site-2fa"],
+    );
+    assert_eq!(code.len(), 6);
+    assert!(code.bytes().all(|b| b.is_ascii_digit()));
+
+    // Distinct ids -> distinct children, so the codes are not a function of the
+    // password: the two entries' fingerprints share nothing.
+    let fpr = |id: &str| {
+        field(
+            &run_pw(home.path(), &["hd-secret", "show", "me", id]),
+            "Fingerprint",
+        )
+    };
+    let (a, b) = (fpr("site"), fpr("site-2fa"));
+    assert_ne!(a, b);
+    let secret_half = |f: String| f.split_once('-').unwrap().1.to_string();
+    assert_ne!(
+        secret_half(a),
+        secret_half(b),
+        "the password's child and the TOTP child must be different key material"
+    );
+
+    // And the password definition cannot be enrolled as TOTP at all
+    sesh_pw(home.path())
+        .env("SESH_CLIPBOARD_CMD", "cat > /dev/null")
+        .args(["hd-secret", "copy", "me", "site", "--setup"])
+        .assert()
+        .failure()
+        .stderr(contains("needs an otp definition").and(contains("separate")));
 }
 
 // hd-secret: group scope
@@ -3792,50 +4118,6 @@ fn list_archived_is_empty_until_something_is_superseded() {
     assert!(archived.contains("(no archived recipes)"), "{archived}");
 }
 
-// The documented hazard, pinned as a test: the fingerprint covers
-// `(master, id, user, epoch)` and **not** `params`, so two recipes at one epoch
-// agree on the fingerprint and render different passwords. The day someone adds
-// a "fingerprints match, we're fine" check to a recovery path, this fails.
-#[test]
-fn the_fingerprint_does_not_cover_params() {
-    let home = TempDir::new().unwrap();
-    let sink = TempDir::new().unwrap();
-    make_identity(home.path(), "me");
-    run_pw(
-        home.path(),
-        &["hd-secret", "create", "me", "bank", "--mode", "b58"],
-    );
-
-    // Two renderings of one epoch's secret, under different params
-    let stored = copy_secret(
-        home.path(),
-        &sink.path().join("a"),
-        &["hd-secret", "copy", "me", "bank"],
-    );
-    let other = copy_secret(
-        home.path(),
-        &sink.path().join("b"),
-        &["hd-secret", "copy", "me", "bank", "--mode", "hex"],
-    );
-    assert_ne!(stored, other, "different params render different passwords");
-
-    // Yet the fingerprint the user is invited to compare is identical, because
-    // it is taken over the child scalar, which params never enter.
-    let fpr = field(
-        &run_pw(home.path(), &["hd-secret", "show", "me", "bank"]),
-        "Fingerprint",
-    );
-    assert!(!fpr.is_empty());
-    let fpr_again = field(
-        &run_pw(
-            home.path(),
-            &["hd-secret", "show", "me", "bank", "--recover", "1"],
-        ),
-        "Fingerprint",
-    );
-    assert_eq!(fpr, fpr_again);
-}
-
 // `share` must never carry an archived epoch: a token below the peers' epoch is
 // classified `Stale` and silently ignored, so it would look like a successful
 // sync while changing nothing.
@@ -4031,33 +4313,21 @@ fn create_recover_asks_before_it_writes_and_declining_is_a_no_op() {
 }
 
 // The recipe is read, never invented: an epoch with no recorded recipe is
-// refused even when explicit formatting flags are supplied.
+// refused, and no flag can supply one (they are refused in their own right).
 #[test]
 fn create_recover_refuses_an_epoch_with_no_recorded_recipe() {
     let home = TempDir::new().unwrap();
     make_identity(home.path(), "me");
     run_pw(home.path(), &["hd-secret", "create", "me", "bank"]); // epoch 1 only
 
-    for args in [
-        vec!["hd-secret", "create", "me", "bank", "--recover", "7"],
-        vec![
-            "hd-secret",
-            "create",
-            "me",
-            "bank",
-            "--recover",
-            "7",
-            "--mode",
-            "hex",
-            "--length",
-            "20",
-        ],
-    ] {
-        recover_create(home.path(), &args, "y")
-            .assert()
-            .failure()
-            .stderr(contains("No recorded recipe"));
-    }
+    recover_create(
+        home.path(),
+        &["hd-secret", "create", "me", "bank", "--recover", "7"],
+        "y",
+    )
+    .assert()
+    .failure()
+    .stderr(contains("No recorded recipe"));
 }
 
 // `u64::MAX` would leave every future `rotate` and `remove` failing on epoch
@@ -4086,11 +4356,12 @@ fn create_recover_rejects_the_bricking_epochs() {
     );
 }
 
-// Explicit flags still override the inherited recipe. The override is
-// called out, because that is exactly how two members agree on the epoch and
-// disagree on the password.
+// A recovery reproduces a recorded recipe, so it takes no formatting flags: a
+// flag that changed the recipe would make the recovered password depend on what
+// each member typed, while every fingerprint and epoch they compare still
+// agreed. Refused up front, and the entry is left alone.
 #[test]
-fn create_recover_lets_explicit_flags_override_but_warns() {
+fn create_recover_refuses_formatting_flags() {
     let home = TempDir::new().unwrap();
     let sink = TempDir::new().unwrap();
     make_identity(home.path(), "me");
@@ -4106,60 +4377,60 @@ fn create_recover_lets_explicit_flags_override_but_warns() {
             "--no-symbols",
         ],
     );
-    let inherited = copy_secret(
+    let recorded = copy_secret(
         home.path(),
         &sink.path().join("a"),
         &["hd-secret", "copy", "me", "bank"],
     );
     run_pw(home.path(), &["hd-secret", "rotate", "me", "bank"]); // epoch 2
 
-    let out = recover_create(
-        home.path(),
-        &[
-            "hd-secret",
-            "create",
-            "me",
-            "bank",
-            "--recover",
-            "1",
-            "--mode",
-            "hex",
-        ],
-        "y",
-    )
-    .assert()
-    .success();
-    let out = String::from_utf8(out.get_output().stdout.clone()).unwrap();
-    assert!(out.contains("Warning: formatting flags override"), "{out}");
-    assert!(out.contains("will hold a\ndifferent password"), "{out}");
-    // The recipe half of the fingerprint is what catches this, so the warning
-    // points at it rather than (as it once did) apologizing for its absence.
-    assert!(
-        out.contains("Compare fingerprints before the dash"),
-        "{out}"
-    );
+    for flag in [
+        &["--mode", "hex"][..],
+        &["--length", "8"][..],
+        &["--symbols"][..],
+        &["--no-symbols"][..],
+        &["--suffix", "!"][..],
+    ] {
+        let mut args = vec!["hd-secret", "create", "me", "bank", "--recover", "1"];
+        args.extend_from_slice(flag);
+        recover_create(home.path(), &args, "y")
+            .assert()
+            .failure()
+            .stderr(contains("--recover").and(contains("rotate")));
+    }
 
-    // The override took effect: a different password at the same epoch
-    let overridden = copy_secret(
-        home.path(),
-        &sink.path().join("b"),
-        &["hd-secret", "copy", "me", "bank"],
-    );
+    // Still at epoch 2: a refused recovery writes nothing
     assert_eq!(
         field(
             &run_pw(home.path(), &["hd-secret", "show", "me", "bank"]),
             "Epoch"
         ),
-        "1"
+        "2"
     );
-    assert_ne!(overridden, inherited);
-    assert!(overridden.starts_with("0x"));
+
+    // And a bare recovery reproduces the recorded password exactly
+    recover_create(
+        home.path(),
+        &["hd-secret", "create", "me", "bank", "--recover", "1"],
+        "y",
+    )
+    .assert()
+    .success();
+    assert_eq!(
+        copy_secret(
+            home.path(),
+            &sink.path().join("b"),
+            &["hd-secret", "copy", "me", "bank"],
+        ),
+        recorded
+    );
 }
 
-// The `<recipe>-<secret>` split, end to end. Reformatting one epoch's secret
-// moves the leading half and leaves the trailing half alone; re-deriving a new
-// secret moves both. That is what lets two members tell "we formatted the same
-// secret differently" from "we are not even holding the same secret"
+// The `<recipe>-<secret>` split, end to end. Two members who format one epoch's
+// child differently move the leading half and leave the trailing half alone;
+// re-deriving a new secret moves both. That is what lets them tell "we formatted
+// the same secret differently" from "we are not even holding the same secret"
+// and it is exactly the state `apply` lands in on a same-epoch conflict.
 #[test]
 fn hd_fingerprint_recipe_half_tracks_params_and_secret_half_tracks_the_child() {
     let halves = |f: &str| {
@@ -4169,57 +4440,63 @@ fn hd_fingerprint_recipe_half_tracks_params_and_secret_half_tracks_the_child() {
     };
     let show = |home: &Path| {
         field(
-            &run_pw(home, &["hd-secret", "show", "me", "bank"]),
+            &run_pw(home, &["hd-secret", "show", "grp", "bank"]),
             "Fingerprint",
         )
     };
 
-    let home = TempDir::new().unwrap();
-    make_identity(home.path(), "me");
-    run_pw(
-        home.path(),
-        &[
-            "hd-secret",
-            "create",
-            "me",
-            "bank",
-            "--mode",
-            "b58",
-            "--no-symbols",
-        ],
+    let homes = wire_group(&["a", "b"]);
+    let (home, peer) = (homes[0].path(), homes[1].path());
+    form_group(home, peer, "grp");
+
+    // Both members create (grp, bank) at epoch 1 (same K, so the same child)
+    // but format it differently. Concurrent edits: no token has been applied.
+    let create = |h: &Path, mode: &str| {
+        run_pw(
+            h,
+            &[
+                "hd-secret",
+                "create",
+                "grp",
+                "bank",
+                "--mode",
+                mode,
+                "--no-symbols",
+            ],
+        );
+    };
+    create(home, "b58");
+    create(peer, "hex");
+
+    let (r0, s0) = halves(&show(home));
+    let (r1, s1) = halves(&show(peer));
+    assert_ne!(r0, r1, "two recipes for one child must move the recipe half");
+    assert_eq!(s0, s1, "...and must not move the secret half");
+
+    // The passwords really do differ, which is what the recipe half is warning
+    // about: agreeing on the secret half is not agreeing on the password.
+    let sink = TempDir::new().unwrap();
+    assert_ne!(
+        copy_secret(
+            home,
+            &sink.path().join("a"),
+            &["hd-secret", "copy", "grp", "bank"]
+        ),
+        copy_secret(
+            peer,
+            &sink.path().join("b"),
+            &["hd-secret", "copy", "grp", "bank"]
+        ),
     );
-    let (r0, s0) = halves(&show(home.path()));
-
-    // Same (id, user, epoch), so the same child formatted differently
-    recover_create(
-        home.path(),
-        &[
-            "hd-secret",
-            "create",
-            "me",
-            "bank",
-            "--recover",
-            "1",
-            "--mode",
-            "hex",
-        ],
-        "y",
-    )
-    .assert()
-    .success();
-    let (r1, s1) = halves(&show(home.path()));
-    assert_ne!(r0, r1, "reformatting must move the recipe half");
-    assert_eq!(s0, s1, "reformatting must not move the secret half");
-
     // A rotate advances the epoch, so the child changes and both halves move
-    run_pw(home.path(), &["hd-secret", "rotate", "me", "bank"]);
-    let (r2, s2) = halves(&show(home.path()));
+    run_pw(peer, &["hd-secret", "rotate", "grp", "bank"]);
+    let (r2, s2) = halves(&show(peer));
     assert_ne!(r1, r2);
     assert_ne!(s1, s2, "a new epoch must move the secret half");
 
     // `list` renders the same fingerprint `show` does, dash and all
-    let listed = run_pw(home.path(), &["hd-secret", "list", "me"]);
-    assert_eq!(table_cell(&listed, "bank", 3), format!("{r2}-{s2}"));
+    let listed = run_pw(peer, &["hd-secret", "list", "grp"]);
+    assert_eq!(table_cell(&listed, "bank", 4), format!("{r2}-{s2}"));
 }
 
 // Inheriting must not be quietly rewritten by clap's `create --mode` default.

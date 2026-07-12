@@ -13,10 +13,22 @@
 //! overwritten (zeroed). Pressing **any key** zeros immediately. Both paths exit
 //! cleanly. In a non-interactive context (piped stdin/stderr) the countdown is
 //! skipped-— there is no terminal to animate or to read a keypress from.
+//!
+//! On Linux the countdown can also end **early, on paste**. X11 and Wayland
+//! clipboards are request-served (the copying process stays alive and hands the
+//! data to each pasting application), so the tool can count paste requests and
+//! drop the selection after a budget of them. macOS's `NSPasteboard` never reports a read, so the
+//! budget is a Linux-only affordance, and the timed zeroing is what everyone
+//! gets. The budget is `linux_paste_count` in [`crate::config::Settings`].
+//!
+//! Everything the countdown writes goes through a [`Sink`], so the loop can be
+//! unit-tested against a recording double instead of a real clipboard.
 
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
+
+use zeroize::Zeroizing;
 
 use crate::terminal::{self, Ended};
 
@@ -82,6 +94,175 @@ pub fn interactive() -> bool {
     terminal::stdin_is_tty() && terminal::stderr_is_tty()
 }
 
+// ----------------------------------
+// The clipboard the countdown drives
+// ----------------------------------
+
+/// Where a `copy` countdown writes. The real one is [`System`]; tests use a
+/// recording double, so the loop is exercised without a clipboard, a subprocess,
+/// or a mutation of the process environment.
+pub trait Sink {
+    /// Put `text` on the clipboard, replacing whatever is there.
+    fn copy(&mut self, text: &str) -> Result<(), String>;
+
+    /// Whether the clipboard has already released the secret because its paste
+    /// budget ran out. Always `false` where no budget applies.
+    fn spent(&mut self) -> bool {
+        false
+    }
+
+    /// Overwrite the clipboard, removing the copied secret.
+    fn clear(&mut self) -> Result<(), String>;
+}
+
+/// The system clipboard, optionally with a **paste budget** (Linux only, see
+/// the module docs): after `pastes` paste requests the tool exits and the
+/// selection is gone, which the countdown notices and stops on.
+pub struct System {
+    pastes: Option<u32>,
+    /// The live paste-counting tool, while it owns the selection
+    child: Option<Child>,
+}
+
+impl System {
+    /// A plain clipboard: copies land, and only the countdown clears them.
+    pub fn new() -> Self {
+        System {
+            pastes: None,
+            child: None,
+        }
+    }
+
+    /// A clipboard that releases the secret after `pastes` pastes.
+    ///
+    /// Only meaningful on Linux and only with a real display server; the caller
+    /// ([`paste_budget`]) decides, so this constructor simply obeys.
+    pub fn with_paste_budget(pastes: u32) -> Self {
+        System {
+            pastes: Some(pastes),
+            child: None,
+        }
+    }
+
+    /// Kill the paste-counting tool, if one is running: it owns the selection,
+    /// so it must go before anything else may own it.
+    fn release(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+impl Default for System {
+    fn default() -> Self {
+        System::new()
+    }
+}
+
+impl Sink for System {
+    fn copy(&mut self, text: &str) -> Result<(), String> {
+        self.release();
+        match self.pastes {
+            None => copy_to_clipboard(text),
+            Some(n) => {
+                self.child = Some(spawn_paste_counting(text, n)?);
+                Ok(())
+            }
+        }
+    }
+
+    fn spent(&mut self) -> bool {
+        // The tool exits once it has served its budget; until then `try_wait`
+        // reports it still running. An error (no such process) is treated as
+        // spent, so a countdown can never wedge on a tool that vanished.
+        match self.child.as_mut() {
+            None => false,
+            Some(child) => !matches!(child.try_wait(), Ok(None)),
+        }
+    }
+
+    fn clear(&mut self) -> Result<(), String> {
+        self.release();
+        clear_clipboard()
+    }
+}
+
+/// The clipboard tool spelled to serve exactly `pastes` paste requests and then
+/// exit, releasing the selection.
+///
+/// Both tools must be kept in the **foreground** (`--foreground` / `-quiet`):
+/// left to themselves they fork, our handle would exit at once, and every
+/// countdown would think its budget was spent on the first frame.
+fn paste_counting_tool(pastes: u32) -> Result<(String, Vec<String>), String> {
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        if pastes != 1 {
+            return Err(format!(
+                "linux_paste_count = {pastes} is not supported on Wayland: wl-copy can serve \
+                 at most one paste (`--paste-once`). Set it to 1, or remove it to keep only \
+                 the timed clearing."
+            ));
+        }
+        return Ok((
+            "wl-copy".into(),
+            vec!["--foreground".into(), "--paste-once".into()],
+        ));
+    }
+    Ok((
+        "xclip".into(),
+        vec![
+            "-selection".into(),
+            "clipboard".into(),
+            "-quiet".into(),
+            "-loops".into(),
+            pastes.to_string(),
+        ],
+    ))
+}
+
+/// Spawn the paste-counting tool, hand it the secret on stdin, and **leave it
+/// running**: it owns the selection until it has served its budget.
+fn spawn_paste_counting(text: &str, pastes: u32) -> Result<Child, String> {
+    let (program, args) = paste_counting_tool(pastes)?;
+    let mut child = Command::new(&program)
+        .args(&args)
+        .stdin(Stdio::piped())
+        // `-quiet` chatters about each selection request; nothing there is ours
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| {
+            format!(
+                "cannot run clipboard tool '{program}': {e} (install it, or remove \
+                 linux_paste_count from settings.json to use the timed clearing only)"
+            )
+        })?;
+    // Dropping the handle closes the pipe, which is what tells the tool the
+    // payload is complete; it then stays alive to serve pastes.
+    child
+        .stdin
+        .take()
+        .expect("stdin was piped")
+        .write_all(text.as_bytes())
+        .map_err(|e| format!("cannot write to clipboard tool '{program}': {e}"))?;
+    Ok(child)
+}
+
+/// The paste budget in force for a `copy`, or `None` for the timed clearing
+/// alone. `None` unless every condition holds: Linux, a real countdown to end
+/// early (interactive), no `SESH_CLIPBOARD_CMD` override (that command *is* the
+/// clipboard, and sesh cannot know how to make it count pastes), and a budget in
+/// the user's config.
+pub fn paste_budget(settings: &crate::config::Settings) -> Option<u32> {
+    if !cfg!(target_os = "linux") || !interactive() {
+        return None;
+    }
+    if std::env::var_os("SESH_CLIPBOARD_CMD").is_some() {
+        return None;
+    }
+    settings.linux_paste_count
+}
+
 /// Re-assert a sane line-input terminal mode after a no-echo prompt or an
 /// interrupted countdown. Thin re-export of [`terminal::ensure_line_input`].
 pub fn ensure_line_input() {
@@ -101,12 +282,42 @@ pub fn ensure_line_input() {
 /// The raw-mode keypress loop is shared with `reveal` via [`terminal::run_countdown`].
 /// `Ctrl-C` and `Ctrl-Z` cancel it like any other key rather than killing or
 /// suspending us with the clipboard still populated.
-pub fn hold_then_clear(timeout: Duration) -> Result<(), String> {
+pub fn hold_then_clear(sink: &mut impl Sink, timeout: Duration) -> Result<(), String> {
+    hold_then_clear_refreshing(sink, timeout, || None)
+}
+
+/// [`hold_then_clear`], but re-copying whenever `refresh` hands back a fresh
+/// payload. `refresh` runs once per animation frame; `None` means "the
+/// clipboard is still current" (the common case, and all a static secret ever
+/// answers). The otp `copy` passes a closure that returns the new code exactly
+/// when the 30-second TOTP window rolls over, so the clipboard never holds a
+/// dead code mid-countdown.
+///
+/// The loop also ends the moment the sink's paste budget is spent (Linux; see
+/// the module docs): the secret is already off the clipboard, so there is
+/// nothing left to zero and nothing left to wait for.
+///
+/// A failed re-copy is deliberately swallowed: mid-animation there is no clean
+/// place to report it, the clipboard then simply keeps the previous (now
+/// stale) code, which is a liveness nit, not a leak, and the final zeroing write
+/// below still runs and still reports its own failure.
+pub fn hold_then_clear_refreshing(
+    sink: &mut impl Sink,
+    timeout: Duration,
+    mut refresh: impl FnMut() -> Option<Zeroizing<String>>,
+) -> Result<(), String> {
     let color = std::env::var_os("NO_COLOR").is_none();
     let mut err = std::io::stderr();
 
     let total = timeout.as_secs_f64();
-    let _ended: Ended = terminal::run_countdown(timeout, |elapsed, secs| {
+    let ended: Ended = terminal::run_countdown_while(timeout, |elapsed, secs| {
+        // Pastes spent: the tool has dropped the selection already
+        if sink.spent() {
+            return false;
+        }
+        if let Some(fresh) = refresh() {
+            let _ = sink.copy(&fresh);
+        }
         // The waterline: fraction of the window still left, 1.0 -> 0.0. It scales
         // the wave's height so the crests sink as time runs out and settle to a
         // flat baseline the instant the clock hits zero.
@@ -118,15 +329,21 @@ pub fn hold_then_clear(timeout: Duration) -> Result<(), String> {
         let line = render_frame(elapsed.as_secs_f64(), secs, remaining, color);
         let _ = write!(err, "\r{line}\x1b[K");
         let _ = err.flush();
+        true
     });
 
     // Clear the status line, zero the clipboard, and confirm
     let _ = write!(err, "\r\x1b[K");
     let _ = err.flush();
-    clear_clipboard()?;
+    sink.clear()?;
     let done = if color { "\x1b[90m" } else { "" };
     let reset = if color { "\x1b[0m" } else { "" };
-    let _ = writeln!(err, "{done}Secret zeroed from clipboard.{reset}");
+    let why = if ended == Ended::Stopped {
+        "Secret pasted; cleared from clipboard."
+    } else {
+        "Secret zeroed from clipboard."
+    };
+    let _ = writeln!(err, "{done}{why}{reset}");
     Ok(())
 }
 
@@ -217,6 +434,106 @@ fn hsl_to_rgb(h: f64, s: f64, l: f64) -> (u8, u8, u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A recording clipboard: what the countdown wrote, in order, and whether it
+    // cleared. `spent_after` mimics a paste budget running out after that many
+    // frames. Driving the loop through a double keeps it out of the process
+    // environment, which `set_var` would otherwise mutate under the other test
+    // threads.
+    #[derive(Default)]
+    struct Recorder {
+        copies: Vec<String>,
+        cleared: bool,
+        frames: u32,
+        spent_after: Option<u32>,
+    }
+
+    impl Sink for Recorder {
+        fn copy(&mut self, text: &str) -> Result<(), String> {
+            self.copies.push(text.to_string());
+            Ok(())
+        }
+        fn spent(&mut self) -> bool {
+            self.frames += 1;
+            self.spent_after.is_some_and(|n| self.frames > n)
+        }
+        fn clear(&mut self) -> Result<(), String> {
+            self.cleared = true;
+            Ok(())
+        }
+    }
+
+    // Every `Some` from the refresh closure lands on the clipboard, in order,
+    // and the clipboard is cleared when the window ends. (What decides *when* a
+    // refresh happens is `cli::otp_refresher`, tested there.)
+    #[test]
+    fn the_countdown_recopies_on_refresh_and_clears_at_the_end() {
+        let mut sink = Recorder::default();
+        // ~16 frames at 60ms: ample even on a loaded machine for the two the
+        // closure hands out.
+        let mut calls = 0;
+        hold_then_clear_refreshing(&mut sink, Duration::from_secs(1), move || {
+            calls += 1;
+            match calls {
+                1 => Some(Zeroizing::new("111111".into())),
+                2 => Some(Zeroizing::new("222222".into())),
+                _ => None,
+            }
+        })
+        .unwrap();
+        assert_eq!(sink.copies, ["111111", "222222"]);
+        assert!(sink.cleared);
+    }
+
+    // No refresh (every non-otp `copy`): the countdown writes nothing and
+    // clears once, at the end.
+    #[test]
+    fn a_plain_countdown_only_clears() {
+        let mut sink = Recorder::default();
+        hold_then_clear(&mut sink, Duration::from_millis(120)).unwrap();
+        assert!(sink.copies.is_empty());
+        assert!(sink.cleared);
+    }
+
+    // A spent paste budget ends the window early: the secret is already off the
+    // clipboard, so there is nothing left to wait for. The clear still runs,
+    // it costs nothing, and covers a tool that exited without releasing.
+    #[test]
+    fn a_spent_paste_budget_ends_the_countdown_early() {
+        let mut sink = Recorder {
+            spent_after: Some(2),
+            ..Recorder::default()
+        };
+        let start = std::time::Instant::now();
+        hold_then_clear(&mut sink, Duration::from_secs(30)).unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "must stop on the spent budget, not run the 30s window out"
+        );
+        assert!(sink.cleared);
+    }
+
+    // Wayland's wl-copy serves at most one paste, so a larger budget is refused
+    // rather than silently honoured as 1. X11's xclip takes any count.
+    #[test]
+    fn the_paste_counting_tool_is_spelled_per_display_server() {
+        let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+        let (program, args) = match paste_counting_tool(1) {
+            Ok(t) => t,
+            Err(e) => panic!("a single paste is always supported: {e}"),
+        };
+        if wayland {
+            assert_eq!(program, "wl-copy");
+            assert!(args.contains(&"--paste-once".to_string()));
+            assert!(args.contains(&"--foreground".to_string()), "or it forks");
+            assert!(paste_counting_tool(3).is_err(), "wl-copy cannot serve 3");
+        } else {
+            assert_eq!(program, "xclip");
+            assert!(args.contains(&"-quiet".to_string()), "or it forks");
+            let three = paste_counting_tool(3).unwrap().1;
+            assert!(three.windows(2).any(|w| w == ["-loops", "3"]));
+        }
+    }
 
     #[test]
     fn wave_color_stays_blue_through_green_never_warm() {

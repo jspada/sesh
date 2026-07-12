@@ -10,6 +10,7 @@
 //! `mode`/`length`/`suffix` must surface as a clean error, never a panic.
 
 use num_bigint::BigUint;
+use zeroize::Zeroizing;
 
 /// Canonical width, in bytes, of a BLS12-381 scalar (the output-secret width)
 pub const SCALAR_BYTES: usize = 32;
@@ -34,7 +35,7 @@ pub fn escape_control(s: &str) -> String {
 }
 
 /// The supported output modes, in display order
-pub const MODES: [&str; 5] = ["hex", "alpha", "b10", "b58", "bip39"];
+pub const MODES: [&str; 6] = ["hex", "alpha", "b10", "b58", "bip39", "otp"];
 
 /// Longest `alpha`-mode string we will emit
 pub fn max_alpha_len() -> usize {
@@ -61,6 +62,12 @@ pub fn max_bip39_len() -> usize {
     311
 }
 
+/// The `otp`-mode string is a fixed shape: the 20-byte TOTP key is exactly 32
+/// unpadded Base32 characters (160 bits = 32 × 5, no leftover bits)
+pub fn max_otp_len() -> usize {
+    crate::totp::KEY_BYTES * 8 / 5
+}
+
 /// Longest string emittable in the given mode, or `None` for an unknown mode
 pub fn max_len(mode: &str) -> Option<usize> {
     match mode {
@@ -69,8 +76,19 @@ pub fn max_len(mode: &str) -> Option<usize> {
         "hex" => Some(max_hex_len()),
         "b58" => Some(max_b58_len()),
         "bip39" => Some(max_bip39_len()),
+        "otp" => Some(max_otp_len()),
         _ => None,
     }
+}
+
+/// Whether `mode`'s output is a **fixed shape** that can carry neither
+/// `--length` nor `--suffix`: a 24-word mnemonic (`bip39`) or a 32-character
+/// TOTP secret (`otp`, whose Base32 export must round-trip into authenticator
+/// apps verbatim). The one predicate every gate consults ([`format_secret`],
+/// and `cli`'s validate/merge/override paths), so the next fixed-shape mode is
+/// a one-line change and the gates cannot drift apart.
+pub fn fixed_rendering(mode: &str) -> bool {
+    matches!(mode, "bip39" | "otp")
 }
 
 /// The mode's "zero" character, used to left-pad a rendering that came out
@@ -102,7 +120,7 @@ fn b10_to_alpha(b10: String) -> String {
 /// The **default** set of characters `--symbols` mixes into the alphabet when
 /// given no explicit set. Broad enough to add real entropy, curated to dodge
 /// characters that commonly break shells, CSVs, URLs, or naive password
-/// validators-— no quotes, backslash, backtick, space, slash, pipe, tilde, or
+/// validators: no quotes, backslash, backtick, space, slash, pipe, tilde, or
 /// angle brackets.
 ///
 /// That curation describes this default, not a global rule: a user who passes
@@ -227,8 +245,36 @@ fn render_body(bytes: &[u8], mode: &str, symbols: Option<&str>) -> Result<String
     Ok(encode_biguint(BigUint::from_bytes_le(bytes), &alphabet))
 }
 
+/// Unpadded RFC 4648 Base32 (alphabet `A–Z2–7`), the TOTP secret interchange
+/// format. **Unpadded is load-bearing**, not a style choice: the Key-URI spec
+/// forbids `=` padding and real importers (Google Authenticator among them)
+/// reject padded secrets. For [`crate::totp::KEY_BYTES`]-byte input the
+/// encoding is exactly 32 characters with no leftover bits, so nothing is
+/// even dropped.
+fn base32_unpadded(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let mut out = String::with_capacity(bytes.len().div_ceil(5) * 8);
+    // Feed bytes into a bit accumulator, emitting a character per 5 bits.
+    // The accumulator never holds more than 12 bits, well inside a u16.
+    let mut acc: u16 = 0;
+    let mut bits = 0u32;
+    for &b in bytes {
+        acc = (acc << 8) | b as u16;
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            out.push(ALPHABET[((acc >> bits) & 0x1f) as usize] as char);
+        }
+    }
+    if bits > 0 {
+        // Final partial group, zero-padded on the right (RFC 4648 §6)
+        out.push(ALPHABET[((acc << (5 - bits)) & 0x1f) as usize] as char);
+    }
+    out
+}
+
 /// Render a byte string in the given output mode. Errors on an unknown mode
-/// or a byte length unsuitable for `bip39`.
+/// or a byte length unsuitable for `bip39`/`otp`.
 pub fn format_bytes(bytes: &[u8], mode: &str) -> Result<String, String> {
     match mode {
         "alpha" => Ok(format!(
@@ -241,8 +287,55 @@ pub fn format_bytes(bytes: &[u8], mode: &str) -> Result<String, String> {
         "bip39" => bip39::Mnemonic::from_entropy(bytes)
             .map(|m| m.to_string())
             .map_err(|e| format!("bip39: {e}")),
+        // The Base32 TOTP secret. `totp::key` is the one place the 32 -> 20
+        // byte truncation happens, shared with the live-code computation.
+        "otp" => {
+            let secret: &[u8; SCALAR_BYTES] = bytes
+                .try_into()
+                .map_err(|_| format!("otp requires a {SCALAR_BYTES}-byte secret"))?;
+            Ok(base32_unpadded(crate::totp::key(secret)))
+        }
         _ => Err(format!("Unknown mode '{mode}'")),
     }
+}
+
+/// The `otpauth://totp/...` Key-URI for an otp-mode definition, the string
+/// authenticator apps import (by QR scan or paste).
+///
+/// Per the Google Authenticator Key-URI convention: the label is
+/// `{issuer}:{account}` (just `{issuer}` when `user` is empty), plus an
+/// explicit `issuer=` parameter; both halves are percent-encoded
+/// per-component. `algorithm`/`digits`/`period` are deliberately **omitted**:
+/// SHA-1/6/30 are the defaults everywhere, and several apps ignore or
+/// mishandle the explicit parameters, so naming them can only lose
+/// compatibility. `Zeroizing` because the URI contains the secret.
+pub fn otpauth_uri(id: &str, user: &str, secret_b32: &str) -> Zeroizing<String> {
+    let issuer = percent_encode(id);
+    let label = if user.is_empty() {
+        issuer.clone()
+    } else {
+        format!("{issuer}:{}", percent_encode(user))
+    };
+    Zeroizing::new(format!(
+        "otpauth://totp/{label}?secret={secret_b32}&issuer={issuer}"
+    ))
+}
+
+/// Percent-encode every byte outside RFC 3986's unreserved set
+/// (`A–Z a–z 0–9 - . _ ~`). Encoding bytewise makes it UTF-8 safe: a
+/// multi-byte character becomes one `%XX` per byte, which is exactly how URI
+/// decoders reassemble it.
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 /// Render a 32-byte secret, optionally with a `symbols` set mixed into the
@@ -266,8 +359,10 @@ pub fn format_secret(
     suffix: Option<&str>,
     symbols: Option<&str>,
 ) -> Result<String, String> {
-    if mode == "bip39" && (length.is_some() || suffix.is_some()) {
-        return Err("--length and --suffix are not compatible with bip39 output".into());
+    if fixed_rendering(mode) && (length.is_some() || suffix.is_some()) {
+        return Err(format!(
+            "--length and --suffix are not compatible with {mode} output"
+        ));
     }
     let mut secret_str = render_body(secret, mode, symbols)?;
     let suffix = suffix.unwrap_or("");
@@ -333,7 +428,7 @@ mod tests {
 
     #[test]
     fn default_length_matches_plain_rendering() {
-        for mode in ["hex", "b58", "b10", "alpha", "bip39"] {
+        for mode in MODES {
             assert_eq!(
                 format_secret(&secret(7), mode, None, None, None).unwrap(),
                 format_bytes(&secret(7), mode).unwrap()
@@ -368,6 +463,115 @@ mod tests {
         assert!(format_secret(&secret(3), "bip39", Some(20), None, None).is_err());
         assert!(format_secret(&secret(3), "bip39", None, Some("!"), None).is_err());
         assert!(format_secret(&secret(3), "bip39", None, None, None).is_ok());
+    }
+
+    // The fixed-shape predicate covers exactly the modes whose output can
+    // carry neither --length nor --suffix. Every mode not named is trimable.
+    #[test]
+    fn fixed_rendering_is_true_exactly_for_bip39_and_otp() {
+        for mode in MODES {
+            assert_eq!(
+                fixed_rendering(mode),
+                mode == "bip39" || mode == "otp",
+                "{mode}"
+            );
+        }
+    }
+
+    // otp is a fixed shape like bip39: --length/--suffix are rejected, and the
+    // error names the mode. --symbols is rejected by the alphabet gate (otp is
+    // not a positional base). All three fire at format_secret too, the gate a
+    // hand-edited registry or a peer's token reaches (the "both gates" rule).
+    #[test]
+    fn otp_rejects_length_suffix_and_symbols_at_both_gates() {
+        let e = format_secret(&secret(3), "otp", Some(20), None, None).unwrap_err();
+        assert!(e.contains("otp"), "the error names the mode: {e}");
+        assert!(format_secret(&secret(3), "otp", None, Some("!"), None).is_err());
+        assert!(format_secret(&secret(3), "otp", None, None, dflt()).is_err());
+        assert!(validate_symbol_set("otp", "!@").is_err());
+        assert!(!supports_symbols("otp"));
+        assert!(format_secret(&secret(3), "otp", None, None, None).is_ok());
+    }
+
+    // RFC 4648 §10 test vectors, unpadded (the trailing '=' groups removed)
+    #[test]
+    fn base32_matches_the_rfc4648_vectors_unpadded() {
+        let cases: [(&[u8], &str); 7] = [
+            (b"", ""),
+            (b"f", "MY"),
+            (b"fo", "MZXQ"),
+            (b"foo", "MZXW6"),
+            (b"foob", "MZXW6YQ"),
+            (b"fooba", "MZXW6YTB"),
+            (b"foobar", "MZXW6YTBOI"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(base32_unpadded(input), want, "{input:?}");
+        }
+        assert!(
+            !base32_unpadded(b"f").contains('='),
+            "padding breaks authenticator imports"
+        );
+    }
+
+    // A 32-byte child renders as exactly 32 Base32 characters of the key's
+    // 20-byte prefix. Fixtures computed independently (Python base64.b32encode
+    // of bytes(range(32))[:20] and bytes([7]*32)[:20], padding stripped).
+    #[test]
+    fn otp_renders_the_20_byte_key_prefix_as_32_base32_chars() {
+        let ramp: [u8; SCALAR_BYTES] = std::array::from_fn(|i| i as u8);
+        assert_eq!(
+            format_bytes(&ramp, "otp").unwrap(),
+            "AAAQEAYEAUDAOCAJBIFQYDIOB4IBCEQT"
+        );
+        assert_eq!(
+            format_bytes(&secret(7), "otp").unwrap(),
+            "A4DQOBYHA4DQOBYHA4DQOBYHA4DQOBYH"
+        );
+        let out = format_bytes(&secret(0xAB), "otp").unwrap();
+        assert_eq!(out.len(), max_otp_len());
+        assert_eq!(out.len(), 32);
+        assert!(out.chars().all(|c| matches!(c, 'A'..='Z' | '2'..='7')));
+        // Bytes 20..32 are presentation-irrelevant: only the key prefix shows
+        let mut tail_differs = ramp;
+        tail_differs[SCALAR_BYTES - 1] ^= 0xff;
+        assert_eq!(
+            format_bytes(&tail_differs, "otp").unwrap(),
+            format_bytes(&ramp, "otp").unwrap()
+        );
+        // And a wrong input width is a clean error, never a panic or a short key
+        assert!(format_bytes(&[0u8; 20], "otp").is_err());
+        assert!(format_bytes(&[0u8; 33], "otp").is_err());
+    }
+
+    // The otpauth URI: exact scheme, label composition, percent-encoding, and
+    // the deliberate omission of algorithm/digits/period.
+    #[test]
+    fn otpauth_uri_encodes_label_and_issuer() {
+        let b32 = "A4DQOBYHA4DQOBYHA4DQOBYHA4DQOBYH";
+        let uri = otpauth_uri("example.com", "bob", b32);
+        assert_eq!(
+            *uri,
+            format!("otpauth://totp/example.com:bob?secret={b32}&issuer=example.com")
+        );
+        // Empty user: no ':{account}' segment, but issuer= stays
+        let uri = otpauth_uri("example.com", "", b32);
+        assert_eq!(
+            *uri,
+            format!("otpauth://totp/example.com?secret={b32}&issuer=example.com")
+        );
+        // Reserved and non-ASCII characters are percent-encoded per component:
+        // space, colon, slash, and a two-byte UTF-8 character
+        let uri = otpauth_uri("my site:a/b", "böb c", b32);
+        assert!(uri.starts_with("otpauth://totp/my%20site%3Aa%2Fb:b%C3%B6b%20c?"));
+        assert!(uri.ends_with("&issuer=my%20site%3Aa%2Fb"));
+        assert!(uri.contains(&format!("secret={b32}")));
+        for param in ["algorithm", "digits", "period"] {
+            assert!(
+                !uri.contains(param),
+                "explicit {param} loses app compatibility"
+            );
+        }
     }
 
     #[test]

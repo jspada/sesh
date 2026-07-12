@@ -1,0 +1,25 @@
+# sesh user config - copy to ~/.config/sesh/config.toml (mode 0600).
+#
+# Optional, and every key in it is optional: sesh runs with no config at all.
+# It holds a *pointer* and *preferences*, never a secret. Values are either a
+# double-quoted string or a bare number; `#` starts a comment. Any key not
+# listed below is a typo, and sesh says so rather than ignoring it.
+
+# Where the keystore lives, if not the default ~/.sesh. Must be absolute.
+# Handy for a removable device. Overridden by --keystore and by $SESH_HOME.
+default_keystore_path = "/Volumes/usb-key/sesh"
+
+# Optional keystore identity (UUID) the path above is expected to carry. sesh stamps
+# every keystore with one and refuses to open a *different* keystore that has
+# been mounted at the same path. Read it from <keystore>/config.toml.
+default_keystore_id = "5a70cdd8-634a-4de2-b0fa-7ad1b4d27f9b"
+
+# Linux only: clear the clipboard after this many pastes, rather than waiting
+# out `copy`'s zeroing countdown. X11 and Wayland clipboards are request-served,
+# so the copying process can count pastes and drop the secret once you have used
+# it. The countdown still runs and still zeros on timeout or a keypress; this
+# only ever clears *earlier*. Wayland's wl-copy serves at most one paste, so
+# only 1 works there (X11's xclip takes any count). A clipboard *manager* that
+# snapshots every selection spends pastes exactly as an app does. macOS has no
+# equivalent and ignores this.
+linux_paste_count = 1

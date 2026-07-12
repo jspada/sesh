@@ -38,6 +38,14 @@ pub fn stderr_is_tty() -> bool {
     std::io::stderr().is_terminal()
 }
 
+/// The controlling terminal's height in rows (`stty size` prints
+/// `rows cols`), or `None` when there is no terminal or no `stty`. Used to
+/// decide whether a tall block (the `reveal --setup` QR) fits on screen.
+pub fn rows() -> Option<usize> {
+    let size = stty(&["size"])?;
+    size.split_whitespace().next()?.parse().ok()
+}
+
 /// Re-assert a sane **line-input** terminal mode: canonical, echoing, and
 /// signal-generating (so `Ctrl-C` interrupts and `Ctrl-Z` suspends). A prior
 /// no-echo password prompt, or a countdown that was interrupted before its
@@ -58,6 +66,8 @@ pub enum Ended {
     TimedOut,
     /// The user pressed a key, **any** key, ending the window early
     Cancelled,
+    /// The caller's per-frame closure asked to stop (see [`run_countdown_while`])
+    Stopped,
 }
 
 /// One animation frame every 60 ms, smooth enough to look alive, cheap enough
@@ -88,6 +98,17 @@ const FRAME: Duration = Duration::from_millis(60);
 /// cannot observe a keypress and `isig` is then untouched, so `Ctrl-C` retains
 /// its usual meaning.
 pub fn run_countdown(timeout: Duration, mut draw: impl FnMut(Duration, u64)) -> Ended {
+    run_countdown_while(timeout, |elapsed, secs| {
+        draw(elapsed, secs);
+        true
+    })
+}
+
+/// [`run_countdown`], but the per-frame closure decides whether to continue:
+/// returning `false` ends the loop early with [`Ended::Stopped`]. The `copy`
+/// countdown uses it to stop the moment the clipboard's paste budget is spent,
+/// since there is then nothing left to zero and nothing left to wait for.
+pub fn run_countdown_while(timeout: Duration, mut tick: impl FnMut(Duration, u64) -> bool) -> Ended {
     let raw = RawMode::enable();
 
     let start = Instant::now();
@@ -99,7 +120,10 @@ pub fn run_countdown(timeout: Duration, mut draw: impl FnMut(Duration, u64)) -> 
         let elapsed = start.elapsed();
         let remaining = timeout.saturating_sub(elapsed);
         let secs = remaining.as_secs_f64().ceil() as u64;
-        draw(elapsed, secs);
+        if !tick(elapsed, secs) {
+            ended = Ended::Stopped;
+            break;
+        }
 
         // Non-blocking read: Ok(1) is any key; Ok(0) is "nothing pressed"
         if raw.is_some() {
